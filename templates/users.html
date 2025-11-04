@@ -1,0 +1,97 @@
+{% extends 'layout.html' %}
+{% block content %}
+<div class="card">
+  <div class="card-body">
+    <form class="row g-2 align-items-end" method="get">
+      <div class="col-md-4">
+        <label class="form-label">Поиск</label>
+        <input type="text" class="form-control" name="q" value="{{ q }}" placeholder="Имя, фамилия, телефон, адрес, ID">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Язык</label>
+        <select class="form-select" name="language">
+          <option value="">Все</option>
+          {% for lang in languages %}
+            <option value="{{ lang }}" {% if language==lang %}selected{% endif %}>{{ lang|upper }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Регион (по адресу)</label>
+        <input type="text" class="form-control" name="region" value="{{ region }}" placeholder="Напр. Самарканд">
+      </div>
+      <div class="col-md-3 text-end">
+        <button class="btn btn-primary">Фильтр</button>
+        <a class="btn btn-outline-secondary" href="{{ url_for('users') }}">Сброс</a>
+        <a class="btn btn-success" href="{{ url_for('export_users', q=q, language=language, region=region) }}">Экспорт CSV</a>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card mt-3">
+  <div class="card-body">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h5 class="mb-0">Пользователи ({{ total }})</h5>
+      <div class="text-muted">Стр. {{ page }}</div>
+    </div>
+    <div class="table-responsive">
+      <table class="table table-striped align-middle">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Имя</th>
+            <th>Фамилия</th>
+            <th>Телефон</th>
+            <th>Язык</th>
+            <th>Адрес</th>
+            <th>Дата</th>
+            <th class="text-end">Действия</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td><span class="text-monospace">{{ u['telegram_id'] }}</span></td>
+            <td>{{ u['first_name'] or '—' }}</td>
+            <td>{{ u['last_name'] or '—' }}</td>
+            <td>{{ u['phone'] or '—' }}</td>
+            <td>
+              {% if u['language'] %}
+                <span class="badge bg-secondary badge-lang">{{ u['language']|upper }}</span>
+              {% else %}
+                —
+              {% endif %}
+            </td>
+            <td style="max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{{ u['address'] }}">{{ u['address'] }}</td>
+            <td>{{ u['created_at'] }}</td>
+            <td class="text-end">
+              <form method="post" action="{{ url_for('delete_user', telegram_id=u['telegram_id']) }}" onsubmit="return confirm('Удалить пользователя?');">
+                <button class="btn btn-sm btn-outline-danger">Удалить</button>
+              </form>
+            </td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="8" class="text-center text-muted">Ничего не найдено</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    {% set pages = (total // page_size) + (1 if total % page_size else 0) %}
+    {% if pages > 1 %}
+    <nav>
+      <ul class="pagination justify-content-center">
+        {% for p in range(1, pages+1) %}
+          <li class="page-item {% if p==page %}active{% endif %}">
+            <a class="page-link" href="{{ url_for('users', q=q, language=language, region=region, page=p, page_size=page_size) }}">{{ p }}</a>
+          </li>
+        {% endfor %}
+      </ul>
+    </nav>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
