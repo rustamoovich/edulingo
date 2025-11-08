@@ -121,6 +121,48 @@ edulingo/
 - `address` (TEXT) — Адрес (включая регион)
 - `created_at` (TEXT) — Дата регистрации
 
+## Деплой на Heroku
+
+### Подготовка
+
+1. Установите [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli)
+
+2. Войдите в Heroku:
+```bash
+heroku login
+```
+
+3. Создайте приложение на Heroku:
+```bash
+heroku create your-app-name
+```
+
+4. Добавьте переменные окружения в Heroku:
+```bash
+heroku config:set BOT_TOKEN=your_bot_token
+heroku config:set BOOK_WEBSITE_URL=https://your-book-website.com
+heroku config:set ADMIN_USERNAME=admin
+heroku config:set ADMIN_PASSWORD=your_secure_password
+heroku config:set SECRET_KEY=your_secret_key
+heroku config:set WEBHOOK_URL=https://your-app-name.herokuapp.com
+```
+
+5. Деплой:
+```bash
+git push heroku main
+```
+
+### Структура на Heroku
+
+- **web dyno** — запускает Flask админ-панель и обрабатывает webhook для Telegram-бота (gunicorn)
+- Бот работает через webhook, не требуется отдельный worker dyno
+
+### Важные замечания
+
+- Heroku использует эфемерную файловую систему — файлы SQLite будут удаляться при перезапуске dyno
+- Рекомендуется использовать PostgreSQL для продакшена (Heroku Postgres)
+- Для постоянного хранения данных рассмотрите использование внешней БД или облачного хранилища
+
 ## Лицензия
 
 MIT License

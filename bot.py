@@ -582,8 +582,8 @@ async def post_init(application: Application) -> None:
     logger.info("База данных инициализирована")
 
 
-def main():
-    """Главная функция запуска бота"""
+def get_bot_application():
+    """Создать и настроить приложение бота"""
     # Создание приложения
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
@@ -607,8 +607,15 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     
-    # Запуск бота
-    logger.info("Бот запущен...")
+    return application
+
+
+def main():
+    """Главная функция запуска бота (polling для локальной разработки)"""
+    application = get_bot_application()
+    
+    # Запуск бота через polling
+    logger.info("Бот запущен через polling...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

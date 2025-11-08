@@ -1,13 +1,45 @@
-from flask import Flask, render_template, request, redirect, url_for, session, send_file, flash
+from flask import Flask, render_template, request, redirect, url_for, session, send_file, flash, Response
 import sqlite3
 import io
+import os
+import logging
+import asyncio
 from datetime import datetime
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment
+from telegram import Update
 from config import DATABASE_PATH, ADMIN_USERNAME, ADMIN_PASSWORD, SECRET_KEY
+from bot import get_bot_application
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO)
+
+# Инициализация бота
+bot_application = None
+
+def init_bot():
+    """Инициализировать бота и установить webhook"""
+    global bot_application
+    bot_application = get_bot_application()
+    
+    # Установка webhook при запуске (если на Heroku)
+    webhook_url = os.environ.get('WEBHOOK_URL')
+    if webhook_url:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(bot_application.bot.set_webhook(url=f"{webhook_url}/webhook"))
+            logging.info(f"Webhook установлен: {webhook_url}/webhook")
+        except Exception as e:
+            logging.error(f"Ошибка установки webhook: {e}")
+        finally:
+            loop.close()
+
+# Инициализация бота при запуске приложения
+init_bot()
 
 
 def get_db_connection():
@@ -238,10 +270,34 @@ def delete_user(telegram_id: int):
     return redirect(url_for('users'))
 
 
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    """Endpoint для получения обновлений от Telegram"""
+    if bot_application is None:
+        return Response('Bot not initialized', status=503)
+    
+    update = Update.de_json(request.get_json(force=True), bot_application.bot)
+    
+    # Обработка обновления асинхронно
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(bot_application.process_update(update))
+    except Exception as e:
+        logging.error(f"Ошибка обработки обновления: {e}")
+    finally:
+        loop.close()
+    
+    return Response('ok', status=200)
+
+
 @app.errorhandler(404)
 def not_found(_):
     return redirect(url_for('users'))
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    import os
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_ENV') != 'production'
+    app.run(host='0.0.0.0', port=port, debug=debug)
