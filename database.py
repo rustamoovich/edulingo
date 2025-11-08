@@ -17,6 +17,7 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     telegram_id INTEGER PRIMARY KEY,
+                    username TEXT,
                     language TEXT,
                     first_name TEXT,
                     last_name TEXT,
@@ -26,6 +27,14 @@ class Database:
                 )
             """)
             await db.commit()
+            
+            # Добавляем поле username если его нет (для существующих БД)
+            try:
+                await db.execute("ALTER TABLE users ADD COLUMN username TEXT")
+                await db.commit()
+            except aiosqlite.OperationalError:
+                # Колонка уже существует
+                pass
     
     async def get_user(self, telegram_id: int) -> Optional[Dict]:
         """Получить пользователя по telegram_id"""
@@ -46,10 +55,11 @@ class Database:
             try:
                 await db.execute("""
                     INSERT INTO users 
-                    (telegram_id, language, first_name, last_name, phone, address)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (telegram_id, username, language, first_name, last_name, phone, address)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 """, (
                     user_data['telegram_id'],
+                    user_data.get('username'),
                     user_data.get('language'),
                     user_data.get('first_name'),
                     user_data.get('last_name'),

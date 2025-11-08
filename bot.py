@@ -19,23 +19,57 @@ from config import BOT_TOKEN, BOOK_WEBSITE_URL, DATABASE_PATH
 # Состояния разговора
 CHOOSING_LANGUAGE, WAITING_CONTACT, WAITING_FIRST_NAME, WAITING_LAST_NAME, WAITING_REGION, WAITING_ADDRESS = range(6)
 
-# Список областей Узбекистана
-UZBEKISTAN_REGIONS = [
-    "Андижанская область",
-    "Бухарская область",
-    "Джизакская область",
-    "Кашкадарьинская область",
-    "Навоийская область",
-    "Наманганская область",
-    "Самаркандская область",
-    "Сурхандарьинская область",
-    "Сырдарьинская область",
-    "Ташкентская область",
-    "Ферганская область",
-    "Хорезмская область",
-    "Республика Каракалпакстан",
-    "г. Ташкент"
-]
+# Список областей Узбекистана на разных языках
+UZBEKISTAN_REGIONS = {
+    'ru': [
+        "Андижанская область",
+        "Бухарская область",
+        "Джизакская область",
+        "Кашкадарьинская область",
+        "Навоийская область",
+        "Наманганская область",
+        "Самаркандская область",
+        "Сурхандарьинская область",
+        "Сырдарьинская область",
+        "Ташкентская область",
+        "Ферганская область",
+        "Хорезмская область",
+        "Республика Каракалпакстан",
+        "г. Ташкент"
+    ],
+    'en': [
+        "Andijan Region",
+        "Bukhara Region",
+        "Jizzakh Region",
+        "Kashkadarya Region",
+        "Navoiy Region",
+        "Namangan Region",
+        "Samarkand Region",
+        "Surkhandarya Region",
+        "Sirdarya Region",
+        "Tashkent Region",
+        "Fergana Region",
+        "Khorezm Region",
+        "Republic of Karakalpakstan",
+        "Tashkent City"
+    ],
+    'uz': [
+        "Andijon viloyati",
+        "Buxoro viloyati",
+        "Jizzax viloyati",
+        "Qashqadaryo viloyati",
+        "Navoiy viloyati",
+        "Namangan viloyati",
+        "Samarqand viloyati",
+        "Surxondaryo viloyati",
+        "Sirdaryo viloyati",
+        "Toshkent viloyati",
+        "Farg'ona viloyati",
+        "Xorazm viloyati",
+        "Qoraqalpog'iston Respublikasi",
+        "Toshkent shahri"
+    ]
+}
 
 # Настройка логирования
 logging.basicConfig(
@@ -47,6 +81,10 @@ logger = logging.getLogger(__name__)
 # Инициализация базы данных
 db = Database(DATABASE_PATH)
 
+# Словари для хранения ID сообщений и команд пользователей
+user_last_message_ids = {}  # {user_id: [message_ids]}
+user_last_command_ids = {}  # {user_id: [command_ids]}
+
 
 # Тексты сообщений (можно расширить для мультиязычности)
 TEXTS = {
@@ -54,7 +92,7 @@ TEXTS = {
         'choose_language': 'Выберите язык интерфейса:',
         'send_contact': 'Отправьте, пожалуйста, ваш номер телефона кнопкой ниже.',
         'share_contact': 'Поделиться контактом',
-        'enter_first_name': 'Введите ваше имя (как в документе):',
+        'enter_first_name': 'Введите ваше имя:',
         'enter_last_name': 'Введите вашу фамилию:',
         'choose_region': 'Выберите область/регион Узбекистана:',
         'enter_address': 'Введите адрес проживания:',
@@ -67,7 +105,7 @@ TEXTS = {
         'choose_language': 'Choose interface language:',
         'send_contact': 'Please send your phone number using the button below.',
         'share_contact': 'Share contact',
-        'enter_first_name': 'Enter your first name (as in your document):',
+        'enter_first_name': 'Enter your first name:',
         'enter_last_name': 'Enter your last name:',
         'choose_region': 'Choose region of Uzbekistan:',
         'enter_address': 'Enter your address:',
@@ -80,7 +118,7 @@ TEXTS = {
         'choose_language': 'Interfeys tilini tanlang:',
         'send_contact': 'Iltimos, telefon raqamingizni quyidagi tugma orqali yuboring.',
         'share_contact': 'Kontaktni ulashish',
-        'enter_first_name': 'Ismingizni kiriting (hujjatdagidek):',
+        'enter_first_name': 'Ismingizni kiriting:',
         'enter_last_name': 'Familiyangizni kiriting:',
         'choose_region': 'O\'zbekiston viloyatini tanlang:',
         'enter_address': 'Yashash manzilingizni kiriting:',
@@ -98,51 +136,153 @@ def get_text(language: str, key: str) -> str:
     return TEXTS[lang].get(key, TEXTS['ru'][key])
 
 
-async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Удалить предыдущие сообщения бота из чата"""
-    if 'bot_messages' not in context.user_data:
-        context.user_data['bot_messages'] = []
-        return
+def format_phone_number(phone: str) -> str:
+    """Форматировать номер телефона: всегда добавлять '+' в начале, если его нет"""
+    if not phone:
+        return phone
     
+    # Убираем все пробелы и дефисы для чистоты
+    phone = phone.strip().replace(' ', '').replace('-', '')
+    
+    # Если номер не начинается с '+', добавляем его
+    if not phone.startswith('+'):
+        phone = '+' + phone
+    
+    return phone
+
+
+async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT_TYPE, delete_current: bool = False):
+    """Удалить предыдущие сообщения бота из чата (асинхронно в фоне)
+    
+    Args:
+        update: Update объект
+        context: Context объект
+        delete_current: Если True, удаляет также последнее сообщение бота
+    """
+    user_id = update.effective_user.id
     chat_id = update.effective_chat.id if update.effective_chat else None
+    
     if not chat_id:
         return
     
-    messages_to_delete = context.user_data['bot_messages'].copy()
-    for msg_id in messages_to_delete:
-        try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
-        except Exception as e:
-            logger.debug(f"Не удалось удалить сообщение {msg_id}: {e}")
+    # Получаем список ID сообщений бота для удаления
+    message_ids_to_delete = user_last_message_ids.get(user_id, [])
     
-    context.user_data['bot_messages'] = []
+    # Получаем список ID команд пользователя для удаления (кроме последней)
+    command_ids_to_delete = user_last_command_ids.get(user_id, [])
+    
+    # Удаляем сообщения бота в фоне (не блокируя основной поток)
+    if message_ids_to_delete:
+        if delete_current:
+            # Удаляем все сообщения, включая последнее
+            messages_to_delete = message_ids_to_delete.copy()
+            # Очищаем список
+            if user_id in user_last_message_ids:
+                user_last_message_ids[user_id] = []
+            
+            # Также удаляем последнюю команду пользователя (если есть)
+            command_to_delete = None
+            if command_ids_to_delete:
+                command_to_delete = command_ids_to_delete[-1]
+                # Оставляем только последнюю команду в списке (она будет удалена)
+                if user_id in user_last_command_ids:
+                    user_last_command_ids[user_id] = command_ids_to_delete[:-1] if len(command_ids_to_delete) > 1 else []
+        else:
+            # Удаляем все, кроме последнего сообщения (оставляем текущее)
+            if len(message_ids_to_delete) > 1:
+                messages_to_delete = message_ids_to_delete[:-1]  # Все кроме последнего
+                # Оставляем только последнее сообщение в списке
+                if user_id in user_last_message_ids:
+                    user_last_message_ids[user_id] = [message_ids_to_delete[-1]]
+            else:
+                # Если только одно сообщение и не нужно удалять текущее, не удаляем ничего
+                messages_to_delete = []
+            command_to_delete = None
+        
+        if messages_to_delete or command_to_delete:
+            async def delete_messages_and_command():
+                # Удаляем сообщения бота
+                for message_id in messages_to_delete:
+                    try:
+                        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+                    except Exception as e:
+                        logger.debug(f"Не удалось удалить сообщение бота {message_id}: {e}")
+                
+                # Удаляем последнюю команду пользователя (если нужно)
+                if command_to_delete:
+                    try:
+                        await context.bot.delete_message(chat_id=chat_id, message_id=command_to_delete)
+                    except Exception as e:
+                        logger.debug(f"Не удалось удалить команду пользователя {command_to_delete}: {e}")
+            
+            # Запускаем удаление в фоне
+            import asyncio
+            asyncio.create_task(delete_messages_and_command())
+    
+    # Удаляем предыдущие команды пользователя (кроме последней) в фоне
+    # Это делается только если delete_current=False
+    if not delete_current and len(command_ids_to_delete) > 1:
+        commands_to_delete = command_ids_to_delete[:-1]
+        
+        async def delete_commands():
+            for command_id in commands_to_delete:
+                try:
+                    await context.bot.delete_message(chat_id=chat_id, message_id=command_id)
+                except Exception as e:
+                    logger.debug(f"Не удалось удалить команду пользователя {command_id}: {e}")
+            # Оставляем только последнюю команду в списке
+            if user_id in user_last_command_ids:
+                user_last_command_ids[user_id] = [command_ids_to_delete[-1]]
+        
+        # Запускаем удаление в фоне
+        import asyncio
+        asyncio.create_task(delete_commands())
 
 
-async def save_message_id(message, context: ContextTypes.DEFAULT_TYPE):
-    """Сохранить ID сообщения для последующего удаления"""
-    if 'bot_messages' not in context.user_data:
-        context.user_data['bot_messages'] = []
-    context.user_data['bot_messages'].append(message.message_id)
+def save_message_id(message, user_id: int):
+    """Сохранить ID сообщения бота для последующего удаления"""
+    if not user_id:
+        return
+    
+    if user_id not in user_last_message_ids:
+        user_last_message_ids[user_id] = []
+    
+    # Ограничиваем количество сохраняемых сообщений (последние 10)
+    if len(user_last_message_ids[user_id]) >= 10:
+        user_last_message_ids[user_id] = user_last_message_ids[user_id][-9:]
+    
+    user_last_message_ids[user_id].append(message.message_id)
+
+
+def save_command_id(update: Update, message_id: int):
+    """Сохранить ID команды пользователя для последующего удаления"""
+    user_id = update.effective_user.id
+    
+    if user_id not in user_last_command_ids:
+        user_last_command_ids[user_id] = []
+    
+    # Ограничиваем количество сохраняемых команд (последние 10)
+    if len(user_last_command_ids[user_id]) >= 10:
+        user_last_command_ids[user_id] = user_last_command_ids[user_id][-9:]
+    
+    user_last_command_ids[user_id].append(message_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /start"""
     user_id = update.effective_user.id
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
-    
-    # Удаляем сообщение пользователя /start
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение пользователя: {e}")
+    # Сохраняем ID команды пользователя
+    save_command_id(update, update.message.message_id)
     
     # Проверяем, зарегистрирован ли пользователь
     user = await db.get_user(user_id)
     
     if user:
         # Пользователь уже зарегистрирован - перенаправляем на сайт
+        # Удаляем предыдущие сообщения (асинхронно в фоне)
+        await delete_previous_messages(update, context)
+        
         language = user.get('language', 'ru')
         text = get_text(language, 'welcome_back')
         
@@ -155,10 +295,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         msg = await update.message.reply_text(text, reply_markup=reply_markup)
-        await save_message_id(msg, context)
+        save_message_id(msg, user_id)
         return ConversationHandler.END
     
     # Новый пользователь - начинаем регистрацию
+    # НЕ удаляем сообщения до получения контакта
     keyboard = [
         [
             InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
@@ -172,11 +313,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Выберите язык интерфейса:\nChoose interface language:\nInterfeys tilini tanlang:",
         reply_markup=reply_markup
     )
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     # Сохраняем состояние регистрации
+    username = update.effective_user.username
     context.user_data['registration'] = {
         'telegram_id': user_id,
+        'username': username,
         'step': 'choosing_language'
     }
     
@@ -188,8 +331,13 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     query = update.callback_query
     await query.answer()
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
+    user_id = update.effective_user.id
+    
+    # Сохраняем ID текущего сообщения с выбором языка для удаления
+    save_message_id(query.message, user_id)
+    
+    # Удаляем предыдущие сообщения + текущее сообщение с выбором языка
+    await delete_previous_messages(update, context, delete_current=True)
     
     language = query.data.split('_')[1]  # lang_ru -> ru
     
@@ -211,18 +359,12 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         resize_keyboard=True
     )
     
-    # Удаляем предыдущее сообщение с выбором языка
-    try:
-        await query.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение: {e}")
-    
     # Отправляем новое сообщение с кнопкой контакта
     msg = await query.message.reply_text(
         text,
         reply_markup=reply_markup
     )
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     return WAITING_CONTACT
 
@@ -232,17 +374,16 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     contact = update.message.contact
     language = context.user_data['registration'].get('language', 'ru')
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
+    # Сохраняем ID сообщения пользователя с контактом
+    user_id = update.effective_user.id
+    save_command_id(update, update.message.message_id)
     
-    # Удаляем сообщение пользователя с контактом
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение пользователя: {e}")
+    # Удаляем предыдущие сообщения + последнее сообщение бота с запросом контакта
+    await delete_previous_messages(update, context, delete_current=True)
     
-    # Сохраняем номер телефона
-    context.user_data['registration']['phone'] = contact.phone_number
+    # Сохраняем номер телефона с форматированием (всегда со знаком '+')
+    phone_number = format_phone_number(contact.phone_number)
+    context.user_data['registration']['phone'] = phone_number
     context.user_data['registration']['step'] = 'waiting_first_name'
     
     # Запрашиваем имя
@@ -252,7 +393,7 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text,
         reply_markup=ReplyKeyboardRemove()
     )
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     return WAITING_FIRST_NAME
 
@@ -262,14 +403,12 @@ async def receive_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     first_name = update.message.text.strip()
     language = context.user_data['registration'].get('language', 'ru')
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
+    # Сохраняем ID сообщения пользователя с именем
+    user_id = update.effective_user.id
+    save_command_id(update, update.message.message_id)
     
-    # Удаляем сообщение пользователя с именем
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение пользователя: {e}")
+    # Удаляем предыдущие сообщения + последнее сообщение бота
+    await delete_previous_messages(update, context, delete_current=True)
     
     # Сохраняем имя
     context.user_data['registration']['first_name'] = first_name
@@ -279,7 +418,7 @@ async def receive_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = get_text(language, 'enter_last_name')
     
     msg = await update.message.reply_text(text)
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     return WAITING_LAST_NAME
 
@@ -289,14 +428,12 @@ async def receive_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     last_name = update.message.text.strip()
     language = context.user_data['registration'].get('language', 'ru')
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
+    # Сохраняем ID сообщения пользователя с фамилией
+    user_id = update.effective_user.id
+    save_command_id(update, update.message.message_id)
     
-    # Удаляем сообщение пользователя с фамилией
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение пользователя: {e}")
+    # Удаляем предыдущие сообщения + последнее сообщение бота
+    await delete_previous_messages(update, context, delete_current=True)
     
     # Сохраняем фамилию
     context.user_data['registration']['last_name'] = last_name
@@ -305,19 +442,22 @@ async def receive_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Запрашиваем выбор области
     text = get_text(language, 'choose_region')
     
+    # Получаем список областей на выбранном языке
+    regions = UZBEKISTAN_REGIONS.get(language, UZBEKISTAN_REGIONS['ru'])
+    
     # Создаем inline-клавиатуру с областями Узбекистана
     keyboard = []
-    for i in range(0, len(UZBEKISTAN_REGIONS), 2):
+    for i in range(0, len(regions), 2):
         row = []
-        row.append(InlineKeyboardButton(UZBEKISTAN_REGIONS[i], callback_data=f"region_{i}"))
-        if i + 1 < len(UZBEKISTAN_REGIONS):
-            row.append(InlineKeyboardButton(UZBEKISTAN_REGIONS[i + 1], callback_data=f"region_{i + 1}"))
+        row.append(InlineKeyboardButton(regions[i], callback_data=f"region_{i}"))
+        if i + 1 < len(regions):
+            row.append(InlineKeyboardButton(regions[i + 1], callback_data=f"region_{i + 1}"))
         keyboard.append(row)
     
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     msg = await update.message.reply_text(text, reply_markup=reply_markup)
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     return WAITING_REGION
 
@@ -327,28 +467,30 @@ async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
+    user_id = update.effective_user.id
+    
+    # Сохраняем ID текущего сообщения с выбором области для удаления
+    save_message_id(query.message, user_id)
+    
+    # Удаляем предыдущие сообщения + текущее сообщение с выбором области
+    await delete_previous_messages(update, context, delete_current=True)
     
     region_index = int(query.data.split('_')[1])
-    region = UZBEKISTAN_REGIONS[region_index]
     language = context.user_data['registration'].get('language', 'ru')
+    
+    # Получаем область на выбранном языке
+    regions = UZBEKISTAN_REGIONS.get(language, UZBEKISTAN_REGIONS['ru'])
+    region = regions[region_index]
     
     # Сохраняем область
     context.user_data['registration']['region'] = region
     context.user_data['registration']['step'] = 'waiting_address'
     
-    # Удаляем предыдущее сообщение с выбором области
-    try:
-        await query.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение: {e}")
-    
     # Запрашиваем адрес
     text = get_text(language, 'enter_address')
     
     msg = await query.message.reply_text(text)
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     return WAITING_ADDRESS
 
@@ -359,14 +501,12 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     language = context.user_data['registration'].get('language', 'ru')
     region = context.user_data['registration'].get('region', '')
     
-    # Удаляем предыдущие сообщения
-    await delete_previous_messages(update, context)
+    # Сохраняем ID сообщения пользователя с адресом
+    user_id = update.effective_user.id
+    save_command_id(update, update.message.message_id)
     
-    # Удаляем сообщение пользователя с адресом
-    try:
-        await update.message.delete()
-    except Exception as e:
-        logger.debug(f"Не удалось удалить сообщение пользователя: {e}")
+    # Удаляем предыдущие сообщения + последнее сообщение бота
+    await delete_previous_messages(update, context, delete_current=True)
     
     # Сохраняем адрес (включая область)
     full_address = f"{region}, {address}" if region else address
@@ -381,7 +521,7 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error creating user: {e}")
         msg = await update.message.reply_text("Произошла ошибка при сохранении данных. Попробуйте позже.")
-        await save_message_id(msg, context)
+        save_message_id(msg, user_id)
         return ConversationHandler.END
     
     # Уведомляем о завершении регистрации
@@ -394,11 +534,10 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     msg = await update.message.reply_text(complete_text, reply_markup=reply_markup)
-    await save_message_id(msg, context)
+    save_message_id(msg, user_id)
     
     # Очищаем данные регистрации
     context.user_data.pop('registration', None)
-    context.user_data.pop('bot_messages', None)
     
     return ConversationHandler.END
 

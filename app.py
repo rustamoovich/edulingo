@@ -1,8 +1,9 @@
 from flask import Flask, render_template, request, redirect, url_for, session, send_file, flash
 import sqlite3
 import io
-import csv
 from datetime import datetime
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment
 from config import DATABASE_PATH, ADMIN_USERNAME, ADMIN_PASSWORD, SECRET_KEY
 
 app = Flask(__name__)
@@ -59,36 +60,49 @@ def users():
     page = max(int(request.args.get('page', 1)), 1)
     page_size = min(max(int(request.args.get('page_size', 20)), 5), 100)
 
-    where = []
-    params = []
-    if q:
-        where.append('(first_name LIKE ? OR last_name LIKE ? OR phone LIKE ? OR address LIKE ? OR CAST(telegram_id AS TEXT) LIKE ?)')
-        like = f'%{q}%'
-        params.extend([like, like, like, like, like])
-    if language:
-        where.append('language = ?')
-        params.append(language)
-    if region:
-        where.append('address LIKE ?')
-        params.append(f'%{region}%')
-
-    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
-
     offset = (page - 1) * page_size
 
+    # Загружаем все записи и фильтруем в Python с учётом Unicode-регистра
     conn = get_db_connection()
-    total = conn.execute(f'SELECT COUNT(*) FROM users {where_sql}', params).fetchone()[0]
     rows = conn.execute(
-        f'SELECT * FROM users {where_sql} ORDER BY datetime(created_at) DESC LIMIT ? OFFSET ?',
-        params + [page_size, offset]
+        'SELECT * FROM users ORDER BY datetime(created_at) DESC'
     ).fetchall()
     conn.close()
+
+    def norm(val: str) -> str:
+        return (val or '').casefold()
+
+    cq = norm(q)
+    clang = norm(language)
+    creg = norm(region)
+
+    filtered = []
+    for r in rows:
+        if language and norm(r['language']) != clang:
+            continue
+        if region and creg not in norm(r['address']):
+            continue
+        if q:
+            haystacks = [
+                norm(r['first_name']),
+                norm(r['last_name']),
+                norm(r['phone']),
+                norm(r['address']),
+                norm(r['username']),
+                str(r['telegram_id'])
+            ]
+            if not any(cq in h for h in haystacks):
+                continue
+        filtered.append(r)
+
+    total = len(filtered)
+    paged = filtered[offset:offset + page_size]
 
     languages = ['ru', 'en', 'uz']
 
     return render_template(
         'users.html',
-        users=rows,
+        users=paged,
         page=page,
         page_size=page_size,
         total=total,
@@ -106,38 +120,111 @@ def export_users():
     language = request.args.get('language', '').strip()
     region = request.args.get('region', '').strip()
 
-    where = []
-    params = []
-    if q:
-        where.append('(first_name LIKE ? OR last_name LIKE ? OR phone LIKE ? OR address LIKE ? OR CAST(telegram_id AS TEXT) LIKE ?)')
-        like = f'%{q}%'
-        params.extend([like, like, like, like, like])
-    if language:
-        where.append('language = ?')
-        params.append(language)
-    if region:
-        where.append('address LIKE ?')
-        params.append(f'%{region}%')
-    where_sql = ('WHERE ' + ' AND '.join(where)) if where else ''
-
     conn = get_db_connection()
     rows = conn.execute(
-        f'SELECT telegram_id, language, first_name, last_name, phone, address, created_at FROM users {where_sql} ORDER BY datetime(created_at) DESC',
-        params
+        'SELECT telegram_id, username, language, first_name, last_name, phone, address, created_at FROM users ORDER BY datetime(created_at) DESC'
     ).fetchall()
     conn.close()
 
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['telegram_id', 'language', 'first_name', 'last_name', 'phone', 'address', 'created_at'])
-    for r in rows:
-        writer.writerow([r['telegram_id'], r['language'], r['first_name'], r['last_name'], r['phone'], r['address'], r['created_at']])
+    def norm(val: str) -> str:
+        return (val or '').casefold()
 
+    cq = norm(q)
+    clang = norm(language)
+    creg = norm(region)
+
+    filtered = []
+    for r in rows:
+        if language and norm(r['language']) != clang:
+            continue
+        if region and creg not in norm(r['address']):
+            continue
+        if q:
+            haystacks = [
+                norm(r['first_name']),
+                norm(r['last_name']),
+                norm(r['phone']),
+                norm(r['address']),
+                norm(r['username']),
+                str(r['telegram_id'])
+            ]
+            if not any(cq in h for h in haystacks):
+                continue
+        filtered.append(r)
+
+    # Создаем Excel файл
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Пользователи"
+    
+    # Заголовки на русском языке
+    headers = ['№', 'ID Telegram', 'Username', 'Язык', 'Имя', 'Фамилия', 'Телефон', 'Адрес', 'Дата регистрации']
+    ws.append(headers)
+    
+    # Форматируем заголовки (жирный шрифт, выравнивание по центру, перенос текста)
+    center_alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+        cell.alignment = center_alignment
+    
+    # Экспортируем данные с нумерацией
+    for idx, r in enumerate(filtered, start=1):
+        # Форматируем телефон как текст для корректного отображения
+        phone = r['phone'] or ''
+        
+        ws.append([
+            idx,  # Номер строки
+            r['telegram_id'],
+            r['username'] or '',
+            r['language'] or '',
+            r['first_name'] or '',
+            r['last_name'] or '',
+            phone,  # openpyxl автоматически обрабатывает текст
+            r['address'] or '',
+            r['created_at'] or ''
+        ])
+        
+        # Устанавливаем формат телефона как текст
+        if phone:
+            phone_cell = ws.cell(row=idx + 1, column=7)
+            phone_cell.number_format = '@'  # Текстовый формат
+        
+        # Выравнивание: все вертикально по центру
+        # Горизонтально по центру все, кроме столбцов 5, 6 и 8 (имя, фамилия и адрес)
+        wrap_alignment_left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+        wrap_alignment_center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+        
+        for col_num in range(1, 10):  # Все столбцы от 1 до 9
+            cell = ws.cell(row=idx + 1, column=col_num)
+            if col_num == 5 or col_num == 6 or col_num == 8:  # Столбцы Имя, Фамилия и Адрес - по левому краю
+                cell.alignment = wrap_alignment_left
+            else:  # Остальные столбцы - по центру
+                cell.alignment = wrap_alignment_center
+    
+    # Устанавливаем ширину столбцов
+    # Столбец 1 (№) - 7, столбец 4 (Язык) - 7, столбец 8 (Адрес) - 30, остальные - 20
+    column_widths = {
+        1: 7,   # №
+        2: 20,  # ID Telegram
+        3: 20,  # Username
+        4: 7,   # Язык
+        5: 20,  # Имя
+        6: 20,  # Фамилия
+        7: 20,  # Телефон
+        8: 30,  # Адрес
+        9: 20   # Дата регистрации
+    }
+    
+    for col_num, width in column_widths.items():
+        ws.column_dimensions[ws.cell(row=1, column=col_num).column_letter].width = width
+    
+    # Сохраняем в память
     mem = io.BytesIO()
-    mem.write(output.getvalue().encode('utf-8-sig'))
+    wb.save(mem)
     mem.seek(0)
-    filename = f'users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv'
-    return send_file(mem, as_attachment=True, download_name=filename, mimetype='text/csv')
+    
+    filename = f'users_{datetime.now().strftime("%Y%m%d_%H%M%S")}.xlsx'
+    return send_file(mem, as_attachment=True, download_name=filename, mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
 
 @app.route('/admin/users/<int:telegram_id>/delete', methods=['POST'])

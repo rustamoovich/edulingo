@@ -5,14 +5,15 @@
     <form class="row g-2 align-items-end" method="get">
       <div class="col-md-4">
         <label class="form-label">Поиск</label>
-        <input type="text" class="form-control" name="q" value="{{ q }}" placeholder="Имя, фамилия, телефон, адрес, ID">
+        <input type="text" class="form-control" name="q" value="{{ q }}"
+          placeholder="Имя, фамилия, телефон, адрес, username, ID">
       </div>
       <div class="col-md-2">
         <label class="form-label">Язык</label>
         <select class="form-select" name="language">
           <option value="">Все</option>
           {% for lang in languages %}
-            <option value="{{ lang }}" {% if language==lang %}selected{% endif %}>{{ lang|upper }}</option>
+          <option value="{{ lang }}" {% if language==lang %}selected{% endif %}>{{ lang|upper }}</option>
           {% endfor %}
         </select>
       </div>
@@ -23,7 +24,8 @@
       <div class="col-md-3 text-end">
         <button class="btn btn-primary">Фильтр</button>
         <a class="btn btn-outline-secondary" href="{{ url_for('users') }}">Сброс</a>
-        <a class="btn btn-success" href="{{ url_for('export_users', q=q, language=language, region=region) }}">Экспорт CSV</a>
+        <a class="btn btn-success" href="{{ url_for('export_users', q=q, language=language, region=region) }}">Экспорт
+          Excel</a>
       </div>
     </form>
   </div>
@@ -39,7 +41,7 @@
       <table class="table table-striped align-middle">
         <thead>
           <tr>
-            <th>ID</th>
+            <th>Имя пользователя</th>
             <th>Имя</th>
             <th>Фамилия</th>
             <th>Телефон</th>
@@ -52,21 +54,32 @@
         <tbody>
           {% for u in users %}
           <tr>
-            <td><span class="text-monospace">{{ u['telegram_id'] }}</span></td>
+            <td>
+              {% if u['username'] %}
+              <a href="https://t.me/{{ u['username'] }}" target="_blank" rel="noopener"
+                class="text-primary text-decoration-none">
+                @{{ u['username'] }}
+              </a>
+              {% else %}
+              <span class="text-muted text-monospace">ID: {{ u['telegram_id'] }}</span>
+              {% endif %}
+            </td>
             <td>{{ u['first_name'] or '—' }}</td>
             <td>{{ u['last_name'] or '—' }}</td>
             <td>{{ u['phone'] or '—' }}</td>
             <td>
               {% if u['language'] %}
-                <span class="badge bg-secondary badge-lang">{{ u['language']|upper }}</span>
+              <span class="badge bg-secondary badge-lang">{{ u['language']|upper }}</span>
               {% else %}
-                —
+              —
               {% endif %}
             </td>
-            <td style="max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{{ u['address'] }}">{{ u['address'] }}</td>
+            <td style="max-width: 280px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"
+              title="{{ u['address'] }}">{{ u['address'] }}</td>
             <td>{{ u['created_at'] }}</td>
             <td class="text-end">
-              <form method="post" action="{{ url_for('delete_user', telegram_id=u['telegram_id']) }}" onsubmit="return confirm('Удалить пользователя?');">
+              <form method="post" action="{{ url_for('delete_user', telegram_id=u['telegram_id']) }}"
+                onsubmit="return confirm('Удалить пользователя?');">
                 <button class="btn btn-sm btn-outline-danger">Удалить</button>
               </form>
             </td>
@@ -85,9 +98,11 @@
     <nav>
       <ul class="pagination justify-content-center">
         {% for p in range(1, pages+1) %}
-          <li class="page-item {% if p==page %}active{% endif %}">
-            <a class="page-link" href="{{ url_for('users', q=q, language=language, region=region, page=p, page_size=page_size) }}">{{ p }}</a>
-          </li>
+        <li class="page-item {% if p==page %}active{% endif %}">
+          <a class="page-link"
+            href="{{ url_for('users', q=q, language=language, region=region, page=p, page_size=page_size) }}">{{ p
+            }}</a>
+        </li>
         {% endfor %}
       </ul>
     </nav>
