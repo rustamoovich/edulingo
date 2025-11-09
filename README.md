@@ -121,47 +121,53 @@ edulingo/
 - `address` (TEXT) — Адрес (включая регион)
 - `created_at` (TEXT) — Дата регистрации
 
-## Деплой на Heroku
+## Деплой на Render.com
 
 ### Подготовка
 
-1. Установите [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli)
+1. Создайте аккаунт на [Render.com](https://render.com)
 
-2. Войдите в Heroku:
-```bash
-heroku login
-```
+2. Подключите ваш GitHub репозиторий к Render
 
-3. Создайте приложение на Heroku:
-```bash
-heroku create your-app-name
-```
+3. Создайте новый Web Service:
+   - **Name**: `edulingo-web` (или любое другое имя)
+   - **Environment**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `gunicorn app:app`
 
-4. Добавьте переменные окружения в Heroku:
-```bash
-heroku config:set BOT_TOKEN=your_bot_token
-heroku config:set BOOK_WEBSITE_URL=https://your-book-website.com
-heroku config:set ADMIN_USERNAME=admin
-heroku config:set ADMIN_PASSWORD=your_secure_password
-heroku config:set SECRET_KEY=your_secret_key
-heroku config:set WEBHOOK_URL=https://your-app-name.herokuapp.com
-```
+4. Добавьте переменные окружения в Render Dashboard:
+   - `BOT_TOKEN` — токен бота от [@BotFather](https://t.me/BotFather)
+   - `BOOK_WEBSITE_URL` — URL сайта книги
+   - `ADMIN_USERNAME` — логин администратора
+   - `ADMIN_PASSWORD` — пароль администратора
+   - `SECRET_KEY` — секретный ключ для Flask (можно сгенерировать случайную строку)
+   - `DATABASE_PATH` — путь к базе данных (например, `edulingo.db`)
+   - `FLASK_ENV` — `production`
+   - `WEBHOOK_URL` — (опционально) URL для webhook. Если не указан, будет автоматически определен из `RENDER_EXTERNAL_URL`
 
-5. Деплой:
-```bash
-git push heroku main
-```
+6. Деплой происходит автоматически при push в репозиторий
 
-### Структура на Heroku
+### Альтернатива: Использование render.yaml
 
-- **web dyno** — запускает Flask админ-панель и обрабатывает webhook для Telegram-бота (gunicorn)
-- Бот работает через webhook, не требуется отдельный worker dyno
+Если вы используете файл `render.yaml`, Render автоматически создаст сервис с нужными настройками:
+
+1. Убедитесь, что `render.yaml` находится в корне репозитория
+2. В Render Dashboard выберите "New" → "Blueprint"
+3. Подключите репозиторий
+4. Render автоматически создаст сервис на основе `render.yaml`
+
+### Структура на Render
+
+- **Web Service** — запускает Flask админ-панель и обрабатывает webhook для Telegram-бота (gunicorn)
+- Бот работает через webhook, не требуется отдельный worker
 
 ### Важные замечания
 
-- Heroku использует эфемерную файловую систему — файлы SQLite будут удаляться при перезапуске dyno
-- Рекомендуется использовать PostgreSQL для продакшена (Heroku Postgres)
+- Render использует эфемерную файловую систему — файлы SQLite будут удаляться при перезапуске сервиса
+- Рекомендуется использовать PostgreSQL для продакшена (Render PostgreSQL)
 - Для постоянного хранения данных рассмотрите использование внешней БД или облачного хранилища
+- Render бесплатно засыпает сервисы после 15 минут неактивности (на бесплатном плане)
+- Для предотвращения засыпания можно использовать сервисы типа "Uptime Robot" для периодических запросов
 
 ## Лицензия
 

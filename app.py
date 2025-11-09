@@ -17,29 +17,53 @@ app.secret_key = SECRET_KEY
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота
+# Инициализация бота (ленивая)
 bot_application = None
+_bot_initialized = False
 
-def init_bot():
-    """Инициализировать бота и установить webhook"""
-    global bot_application
-    bot_application = get_bot_application()
+def get_bot():
+    """Получить или инициализировать бота (ленивая инициализация)"""
+    global bot_application, _bot_initialized
     
-    # Установка webhook при запуске (если на Heroku)
-    webhook_url = os.environ.get('WEBHOOK_URL')
-    if webhook_url:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot_application.bot.set_webhook(url=f"{webhook_url}/webhook"))
-            logging.info(f"Webhook установлен: {webhook_url}/webhook")
-        except Exception as e:
-            logging.error(f"Ошибка установки webhook: {e}")
-        finally:
-            loop.close()
-
-# Инициализация бота при запуске приложения
-init_bot()
+    if not _bot_initialized:
+        bot_application = get_bot_application()
+        
+        # Автоматическое определение URL для webhook
+        webhook_url = os.environ.get('WEBHOOK_URL')
+        
+        # Если WEBHOOK_URL не указан, пытаемся определить автоматически
+        if not webhook_url:
+            # Render.com предоставляет RENDER_EXTERNAL_URL
+            render_url = os.environ.get('RENDER_EXTERNAL_URL')
+            if render_url:
+                webhook_url = render_url
+            else:
+                # Попытка определить из других источников
+                # Можно использовать переменную PORT для определения, что мы на Render/Heroku
+                port = os.environ.get('PORT')
+                if port:
+                    # На Render/Heroku обычно есть переменная с URL
+                    # Если нет, можно попробовать определить из запроса
+                    pass
+        
+        # Установка webhook при первой инициализации
+        if webhook_url:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
+                loop.run_until_complete(bot_application.bot.set_webhook(url=webhook_full_url))
+                logging.info(f"Webhook автоматически установлен: {webhook_full_url}")
+            except Exception as e:
+                logging.error(f"Ошибка установки webhook: {e}")
+            finally:
+                loop.close()
+        else:
+            logging.warning("WEBHOOK_URL не указан и не может быть определен автоматически. Webhook не установлен.")
+        
+        _bot_initialized = True
+    
+    return bot_application
 
 
 def get_db_connection():
@@ -273,22 +297,24 @@ def delete_user(telegram_id: int):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     """Endpoint для получения обновлений от Telegram"""
-    if bot_application is None:
-        return Response('Bot not initialized', status=503)
-    
-    update = Update.de_json(request.get_json(force=True), bot_application.bot)
-    
-    # Обработка обновления асинхронно
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(bot_application.process_update(update))
+        bot_app = get_bot()
+        update = Update.de_json(request.get_json(force=True), bot_app.bot)
+        
+        # Обработка обновления асинхронно
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(bot_app.process_update(update))
+        except Exception as e:
+            logging.error(f"Ошибка обработки обновления: {e}")
+        finally:
+            loop.close()
+        
+        return Response('ok', status=200)
     except Exception as e:
-        logging.error(f"Ошибка обработки обновления: {e}")
-    finally:
-        loop.close()
-    
-    return Response('ok', status=200)
+        logging.error(f"Ошибка в webhook: {e}")
+        return Response('Error', status=500)
 
 
 @app.errorhandler(404)

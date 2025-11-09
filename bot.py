@@ -578,6 +578,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application: Application) -> None:
     """Инициализация базы данных после создания приложения"""
+    # Создаем экземпляр базы данных для инициализации
+    db = Database(DATABASE_PATH)
     await db.init_db()
     logger.info("База данных инициализирована")
 
