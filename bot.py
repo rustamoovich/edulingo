@@ -333,10 +333,8 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     user_id = update.effective_user.id
     
-    # Сохраняем ID текущего сообщения с выбором языка для удаления
-    save_message_id(query.message, user_id)
-    
-    # Удаляем предыдущие сообщения + текущее сообщение с выбором языка
+    # Сообщение с выбором языка уже было сохранено в start()
+    # Удаляем предыдущие сообщения + текущее сообщение с выбором языка + команду /start
     await delete_previous_messages(update, context, delete_current=True)
     
     language = query.data.split('_')[1]  # lang_ru -> ru
