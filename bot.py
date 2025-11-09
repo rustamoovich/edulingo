@@ -586,7 +586,8 @@ async def post_init(application: Application) -> None:
 
 def get_bot_application():
     """Создать и настроить приложение бота"""
-    # Создание приложения
+    # Создание приложения без Updater (для webhook)
+    # Используем update_queue=None чтобы не создавать Updater
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
     # Создание ConversationHandler для регистрации

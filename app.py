@@ -62,42 +62,46 @@ def get_bot():
     global bot_application, _bot_initialized
     
     if not _bot_initialized:
-        bot_application = get_bot_application()
-        
-        # Автоматическое определение URL для webhook
-        webhook_url = os.environ.get('WEBHOOK_URL')
-        
-        # Если WEBHOOK_URL не указан, пытаемся определить автоматически
-        if not webhook_url:
-            # Render.com предоставляет RENDER_EXTERNAL_URL
-            render_url = os.environ.get('RENDER_EXTERNAL_URL')
-            if render_url:
-                webhook_url = render_url
+        try:
+            bot_application = get_bot_application()
+            
+            # Автоматическое определение URL для webhook
+            webhook_url = os.environ.get('WEBHOOK_URL')
+            
+            # Если WEBHOOK_URL не указан, пытаемся определить автоматически
+            if not webhook_url:
+                # Render.com предоставляет RENDER_EXTERNAL_URL
+                render_url = os.environ.get('RENDER_EXTERNAL_URL')
+                if render_url:
+                    webhook_url = render_url
+                else:
+                    # Попытка определить из других источников
+                    # Можно использовать переменную PORT для определения, что мы на Render/Heroku
+                    port = os.environ.get('PORT')
+                    if port:
+                        # На Render/Heroku обычно есть переменная с URL
+                        # Если нет, можно попробовать определить из запроса
+                        pass
+            
+            # Установка webhook при первой инициализации
+            if webhook_url:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
+                    loop.run_until_complete(bot_application.bot.set_webhook(url=webhook_full_url))
+                    logging.info(f"Webhook автоматически установлен: {webhook_full_url}")
+                except Exception as e:
+                    logging.error(f"Ошибка установки webhook: {e}", exc_info=True)
+                finally:
+                    loop.close()
             else:
-                # Попытка определить из других источников
-                # Можно использовать переменную PORT для определения, что мы на Render/Heroku
-                port = os.environ.get('PORT')
-                if port:
-                    # На Render/Heroku обычно есть переменная с URL
-                    # Если нет, можно попробовать определить из запроса
-                    pass
-        
-        # Установка webhook при первой инициализации
-        if webhook_url:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
-                loop.run_until_complete(bot_application.bot.set_webhook(url=webhook_full_url))
-                logging.info(f"Webhook автоматически установлен: {webhook_full_url}")
-            except Exception as e:
-                logging.error(f"Ошибка установки webhook: {e}")
-            finally:
-                loop.close()
-        else:
-            logging.warning("WEBHOOK_URL не указан и не может быть определен автоматически. Webhook не установлен.")
-        
-        _bot_initialized = True
+                logging.warning("WEBHOOK_URL не указан и не может быть определен автоматически. Webhook не установлен.")
+            
+            _bot_initialized = True
+        except Exception as e:
+            logging.error(f"Ошибка инициализации бота: {e}", exc_info=True)
+            raise
     
     return bot_application
 
@@ -372,22 +376,24 @@ def webhook_status():
                     logging.info(f"Webhook установлен через /webhook/status: {webhook_full_url}")
                     webhook_info = loop.run_until_complete(bot_app.bot.get_webhook_info())
             
-            loop.close()
-            
-            return jsonify({
+            result = {
                 'status': 'ok',
-                'webhook_url': webhook_info.url,
+                'webhook_url': webhook_info.url or '',
                 'has_custom_certificate': webhook_info.has_custom_certificate,
                 'pending_update_count': webhook_info.pending_update_count,
                 'last_error_date': str(webhook_info.last_error_date) if webhook_info.last_error_date else None,
                 'last_error_message': webhook_info.last_error_message,
                 'max_connections': webhook_info.max_connections,
                 'allowed_updates': webhook_info.allowed_updates
-            })
+            }
+            loop.close()
+            return jsonify(result)
         except Exception as e:
             loop.close()
+            logging.error(f"Ошибка в webhook_status: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': str(e)}), 500
     except Exception as e:
+        logging.error(f"Ошибка получения бота в webhook_status: {e}", exc_info=True)
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
