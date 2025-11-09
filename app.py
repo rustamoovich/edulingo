@@ -85,16 +85,22 @@ def get_bot():
             
             # Установка webhook при первой инициализации
             if webhook_url:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
                 try:
+                    loop = asyncio.get_event_loop()
+                except RuntimeError:
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                try:
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    
                     webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
                     loop.run_until_complete(bot_application.bot.set_webhook(url=webhook_full_url))
                     logging.info(f"Webhook автоматически установлен: {webhook_full_url}")
                 except Exception as e:
                     logging.error(f"Ошибка установки webhook: {e}", exc_info=True)
-                finally:
-                    loop.close()
             else:
                 logging.warning("WEBHOOK_URL не указан и не может быть определен автоматически. Webhook не установлен.")
             
@@ -342,14 +348,20 @@ def webhook():
         update = Update.de_json(request.get_json(force=True), bot_app.bot)
         
         # Обработка обновления асинхронно
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        try:
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
             loop.run_until_complete(bot_app.process_update(update))
         except Exception as e:
-            logging.error(f"Ошибка обработки обновления: {e}")
-        finally:
-            loop.close()
+            logging.error(f"Ошибка обработки обновления: {e}", exc_info=True)
         
         return Response('ok', status=200)
     except Exception as e:
@@ -362,9 +374,18 @@ def webhook_status():
     """Проверка статуса webhook"""
     try:
         bot_app = get_bot()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        
         try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        
+        try:
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
             webhook_info = loop.run_until_complete(bot_app.bot.get_webhook_info())
             
             # Если webhook не установлен, пытаемся установить
@@ -386,10 +407,8 @@ def webhook_status():
                 'max_connections': webhook_info.max_connections,
                 'allowed_updates': webhook_info.allowed_updates
             }
-            loop.close()
             return jsonify(result)
         except Exception as e:
-            loop.close()
             logging.error(f"Ошибка в webhook_status: {e}", exc_info=True)
             return jsonify({'status': 'error', 'message': str(e)}), 500
     except Exception as e:
