@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, send_file, flash, Response
+from flask import Flask, render_template, request, redirect, url_for, session, send_file, flash, Response, jsonify
 import sqlite3
 import io
 import os
@@ -349,12 +349,60 @@ def webhook():
         
         return Response('ok', status=200)
     except Exception as e:
-        logging.error(f"Ошибка в webhook: {e}")
+        logging.error(f"Ошибка в webhook: {e}", exc_info=True)
         return Response('Error', status=500)
 
 
+@app.route('/webhook/status', methods=['GET'])
+def webhook_status():
+    """Проверка статуса webhook"""
+    try:
+        bot_app = get_bot()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            webhook_info = loop.run_until_complete(bot_app.bot.get_webhook_info())
+            
+            # Если webhook не установлен, пытаемся установить
+            if not webhook_info.url:
+                webhook_url = os.environ.get('WEBHOOK_URL') or os.environ.get('RENDER_EXTERNAL_URL')
+                if webhook_url:
+                    webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
+                    loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_full_url))
+                    logging.info(f"Webhook установлен через /webhook/status: {webhook_full_url}")
+                    webhook_info = loop.run_until_complete(bot_app.bot.get_webhook_info())
+            
+            loop.close()
+            
+            return jsonify({
+                'status': 'ok',
+                'webhook_url': webhook_info.url,
+                'has_custom_certificate': webhook_info.has_custom_certificate,
+                'pending_update_count': webhook_info.pending_update_count,
+                'last_error_date': str(webhook_info.last_error_date) if webhook_info.last_error_date else None,
+                'last_error_message': webhook_info.last_error_message,
+                'max_connections': webhook_info.max_connections,
+                'allowed_updates': webhook_info.allowed_updates
+            })
+        except Exception as e:
+            loop.close()
+            return jsonify({'status': 'error', 'message': str(e)}), 500
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+@app.route('/')
+def index():
+    """Главная страница - редирект на админ-панель"""
+    return redirect(url_for('users'))
+
+
 @app.errorhandler(404)
-def not_found(_):
+def not_found(e):
+    """Обработчик 404 - редирект на админ-панель, но не для webhook endpoints"""
+    # Не редиректим webhook endpoints
+    if request.path.startswith('/webhook'):
+        return jsonify({'error': 'Not found'}), 404
     return redirect(url_for('users'))
 
 
