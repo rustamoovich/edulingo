@@ -65,6 +65,25 @@ def get_bot():
         try:
             bot_application = get_bot_application()
             
+            # Инициализация Application (требуется для python-telegram-bot 21.0+)
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            try:
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                # Инициализируем Application
+                loop.run_until_complete(bot_application.initialize())
+                logging.info("Application инициализирован")
+            except Exception as e:
+                logging.error(f"Ошибка инициализации Application: {e}", exc_info=True)
+                raise
+            
             # Автоматическое определение URL для webhook
             webhook_url = os.environ.get('WEBHOOK_URL')
             
@@ -86,16 +105,6 @@ def get_bot():
             # Установка webhook при первой инициализации
             if webhook_url:
                 try:
-                    loop = asyncio.get_event_loop()
-                except RuntimeError:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                
-                try:
-                    if loop.is_closed():
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                    
                     webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
                     loop.run_until_complete(bot_application.bot.set_webhook(url=webhook_full_url))
                     logging.info(f"Webhook автоматически установлен: {webhook_full_url}")
@@ -341,6 +350,7 @@ def delete_user(telegram_id: int):
 
 
 @app.route('/webhook', methods=['POST'])
+@app.route('/webhook/', methods=['POST'])
 def webhook():
     """Endpoint для получения обновлений от Telegram"""
     try:
@@ -370,6 +380,7 @@ def webhook():
 
 
 @app.route('/webhook/status', methods=['GET'])
+@app.route('/webhook/status/', methods=['GET'])
 def webhook_status():
     """Проверка статуса webhook"""
     try:
@@ -427,7 +438,7 @@ def not_found(e):
     """Обработчик 404 - редирект на админ-панель, но не для webhook endpoints"""
     # Не редиректим webhook endpoints
     if request.path.startswith('/webhook'):
-        return jsonify({'error': 'Not found'}), 404
+        return jsonify({'error': 'Not found', 'path': request.path}), 404
     return redirect(url_for('users'))
 
 
