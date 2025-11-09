@@ -17,6 +17,42 @@ app.secret_key = SECRET_KEY
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# Инициализация базы данных при запуске Flask
+def init_database():
+    """Инициализировать базу данных синхронно для Flask"""
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    
+    # Создаем таблицу users если её нет
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            telegram_id INTEGER PRIMARY KEY,
+            username TEXT,
+            language TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            phone TEXT,
+            address TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Проверяем наличие колонки username, если нет - добавляем
+    cursor.execute("PRAGMA table_info(users)")
+    columns = [column[1] for column in cursor.fetchall()]
+    if 'username' not in columns:
+        try:
+            cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
+        except sqlite3.OperationalError:
+            pass  # Колонка уже существует
+    
+    conn.commit()
+    conn.close()
+    logging.info("База данных инициализирована для Flask")
+
+# Инициализируем базу данных при импорте модуля
+init_database()
+
 # Инициализация бота (ленивая)
 bot_application = None
 _bot_initialized = False
