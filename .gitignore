@@ -46,3 +46,5 @@ Thumbs.db
 # Commit message
 commit_message.txt
 
+# Audio files
+audios/

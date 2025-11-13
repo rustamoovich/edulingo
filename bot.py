@@ -2,7 +2,10 @@
 Telegram-бот для регистрации пользователей Edulingo
 """
 import logging
-from typing import Dict
+import os
+import math
+import asyncio
+from typing import Dict, List, Optional, Tuple
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application,
@@ -18,6 +21,24 @@ from config import BOT_TOKEN, BOOK_WEBSITE_URL, DATABASE_PATH
 
 # Состояния разговора
 CHOOSING_LANGUAGE, WAITING_CONTACT, WAITING_FIRST_NAME, WAITING_LAST_NAME, WAITING_REGION, WAITING_ADDRESS = range(6)
+
+# Настройки уроков
+PAGE_SIZE = 12
+
+# Индекс аудио: { lang: { category: [ {order:int, title:str, path:str} ] } }
+AUDIO_INDEX: Dict[str, Dict[str, List[Dict]]] = {"ru": {}, "en": {}, "uz": {}}
+SUPPORTED_LANGS = {"ru", "en", "uz"}
+CATEGORY_ALIASES = {
+    "lessons": ["1-30-darslar", "1-30-darslar/", "1-30-darslar\\"],
+    "dialogs": ["Dialoglar"],
+    "mini_dialogs": ["Mini dialoglar"],
+}
+LANG_DIR_ALIASES = {
+    "ru": ["Rus tili"],
+    "en": ["Ingliz tili"],
+    # Если появится узбекская озвучка, добавим алиас
+    "uz": ["O'zbek tili", "Uzbek tili"]
+}
 
 # Список областей Узбекистана на разных языках
 UZBEKISTAN_REGIONS = {
@@ -84,7 +105,312 @@ db = Database(DATABASE_PATH)
 # Словари для хранения ID сообщений и команд пользователей
 user_last_message_ids = {}  # {user_id: [message_ids]}
 user_last_command_ids = {}  # {user_id: [command_ids]}
+user_last_audio_id = {}  # {user_id: message_id} - ID последнего отправленного аудио
 
+def _is_numbered_filename(filename: str) -> Optional[Tuple[int, str]]:
+    """
+    Попытаться извлечь порядковый номер и короткий заголовок из имени файла:
+    '12. Text.mp3' -> (12, 'Text')
+    """
+    try:
+        name = os.path.splitext(os.path.basename(filename))[0]
+        parts = name.split('.', 1)
+        if len(parts) == 2:
+            order = int(parts[0].strip())
+            title = parts[1].strip().replace('_', ' ')
+            return order, title
+        # Альтернатива: '12 - Title'
+        parts = name.split('-', 1)
+        if len(parts) == 2:
+            order = int(parts[0].strip())
+            title = parts[1].strip().replace('_', ' ')
+            return order, title
+    except Exception:
+        return None
+    return None
+
+def _match_lang_dir(dirname: str) -> Optional[str]:
+    for lang, aliases in LANG_DIR_ALIASES.items():
+        if dirname in aliases:
+            return lang
+    return None
+
+def _match_category(path_parts: List[str]) -> Optional[str]:
+    # Ищем по последнему сегменту пути
+    last = path_parts[-1]
+    for cat, aliases in CATEGORY_ALIASES.items():
+        for a in aliases:
+            if last == a or last.endswith(a):
+                return cat
+    # Спец-случай: путь типа '.../Audio darslar/1-30-darslar'
+    for p in path_parts:
+        for cat, aliases in CATEGORY_ALIASES.items():
+            if any(p == a for a in aliases):
+                return cat
+    return None
+
+def build_audio_index(audios_root: str = "audios") -> None:
+    """
+    Построить индекс аудиофайлов из папки audios.
+    Ожидаем структуру с языковыми папками и категориями внутри.
+    """
+    global AUDIO_INDEX
+    AUDIO_INDEX = { "ru": {}, "en": {}, "uz": {} }
+    if not os.path.isdir(audios_root):
+        logger.info(f"Папка с аудио не найдена: {audios_root}")
+        return
+
+    for top in os.listdir(audios_root):
+        top_path = os.path.join(audios_root, top)
+        if not os.path.isdir(top_path):
+            continue
+        lang = _match_lang_dir(top)
+        if not lang:
+            continue
+        # Обходим подкаталоги категорий
+        for root, dirs, files in os.walk(top_path):
+            # Определяем категорию по пути
+            rel = os.path.relpath(root, top_path).replace('\\', '/')
+            if rel in ("", ".", "./"):
+                continue
+            cat = _match_category(rel.split('/'))
+            if not cat:
+                continue
+            if cat not in AUDIO_INDEX[lang]:
+                AUDIO_INDEX[lang][cat] = []
+            for f in files:
+                if not f.lower().endswith(".mp3"):
+                    continue
+                full_path = os.path.join(root, f)
+                parsed = _is_numbered_filename(f)
+                if parsed:
+                    order, title = parsed
+                else:
+                    order, title = 9999, os.path.splitext(f)[0]
+                AUDIO_INDEX[lang][cat].append({
+                    "order": order,
+                    "title": title,
+                    "path": full_path.replace("\\", "/"),
+                })
+            # Сортировка по order, затем по имени
+            AUDIO_INDEX[lang][cat].sort(key=lambda x: (x["order"], x["title"]))
+
+def paginate(items: List[Dict], page: int, page_size: int = PAGE_SIZE) -> Tuple[List[Dict], int, int]:
+    total = len(items)
+    total_pages = max(1, math.ceil(total / page_size))
+    page = max(1, min(page, total_pages))
+    start = (page - 1) * page_size
+    end = start + page_size
+    return items[start:end], page, total_pages
+
+async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, language: str, category: str = "lessons", page: int = 1, audio_lang: str = None):
+    """Показать список уроков с пагинацией.
+    
+    Args:
+        language: Язык интерфейса пользователя (ru/en/uz)
+        category: Категория уроков (lessons/dialogs/mini_dialogs)
+        page: Номер страницы
+        audio_lang: Язык разговорника (ru/en). Если None, определяется автоматически из language
+    """
+    interface_lang = language if language in SUPPORTED_LANGS else "ru"
+    
+    # Определяем язык разговорника
+    if audio_lang is None:
+        # Проверяем, есть ли сохраненный язык в context
+        audio_lang = context.user_data.get('audio_lang')
+        if audio_lang is None:
+            # Если язык интерфейса английский, показываем английский разговорник
+            # Если русский или узбекский - показываем русский разговорник
+            if interface_lang == 'en':
+                audio_lang = 'en'
+            else:
+                audio_lang = 'ru'
+    
+    # Сохраняем выбранный язык разговорника в context
+    context.user_data['audio_lang'] = audio_lang
+    
+    if not AUDIO_INDEX or not AUDIO_INDEX.get(audio_lang):
+        build_audio_index()
+    lessons_by_cat = AUDIO_INDEX.get(audio_lang, {})
+    if category not in lessons_by_cat or not lessons_by_cat[category]:
+        # Если нет такой категории, попробуем другую
+        if lessons_by_cat:
+            category = next(iter(lessons_by_cat))
+        else:
+            if update.callback_query:
+                await update.callback_query.answer("Аудио-уроки пока недоступны.")
+            else:
+                await update.effective_message.reply_text("Аудио-уроки пока недоступны.")
+            return
+    items = lessons_by_cat[category]
+    page_items, cur_page, total_pages = paginate(items, page, PAGE_SIZE)
+
+    # Кнопки уроков
+    rows = []
+    for it in page_items:
+        label = f"{it['order']:02d}. {it['title']}"
+        rows.append([InlineKeyboardButton(label, callback_data=f"play_{category}_{it['order']}")])
+    # Пагинация
+    nav = []
+    if cur_page > 1:
+        nav.append(InlineKeyboardButton("⬅️", callback_data=f"list_{category}_{cur_page-1}"))
+    nav.append(InlineKeyboardButton(f"{cur_page}/{total_pages}", callback_data="noop"))
+    if cur_page < total_pages:
+        nav.append(InlineKeyboardButton("➡️", callback_data=f"list_{category}_{cur_page+1}"))
+    if nav:
+        rows.append(nav)
+    # Переключение категорий (если есть несколько)
+    cats = list(lessons_by_cat.keys())
+    if len(cats) > 1:
+        cat_row = []
+        for c in cats[:3]:  # не перегружаем интерфейс
+            emoji = "📘" if c == "lessons" else ("💬" if c == "dialogs" else "🗣️")
+            # Получаем читаемое название категории на выбранном языке интерфейса
+            category_name = CATEGORY_NAMES.get(interface_lang, CATEGORY_NAMES['ru']).get(c, c)
+            cat_row.append(InlineKeyboardButton(f"{emoji} {category_name}", callback_data=f"list_{c}_1"))
+        rows.append(cat_row)
+
+    # Добавляем кнопки переключения языка разговорника вверху списка
+    # Проверяем, какие языки доступны в аудио-индексе
+    available_langs = []
+    if AUDIO_INDEX:
+        if 'ru' in AUDIO_INDEX and AUDIO_INDEX['ru']:
+            available_langs.append('ru')
+        if 'en' in AUDIO_INDEX and AUDIO_INDEX['en']:
+            available_langs.append('en')
+    
+    # Если доступны оба языка, добавляем кнопки переключения
+    if len(available_langs) > 1:
+        lang_buttons = []
+        for lang_option in available_langs:
+            if lang_option == 'ru':
+                label = "🇷🇺 Русский разговорник"
+            elif lang_option == 'en':
+                label = "🇺🇸 English phrasebook"
+            else:
+                label = lang_option
+            
+            # Если это текущий язык разговорника, выделяем галочкой
+            if lang_option == audio_lang:
+                lang_buttons.append(InlineKeyboardButton(f"✓ {label}", callback_data=f"switch_lang_{lang_option}_{category}_{page}"))
+            else:
+                lang_buttons.append(InlineKeyboardButton(label, callback_data=f"switch_lang_{lang_option}_{category}_{page}"))
+        
+        # Вставляем кнопки языка в начало списка
+        rows.insert(0, lang_buttons)
+    
+    reply_markup = InlineKeyboardMarkup(rows)
+    text_map = {
+        "ru": "Выберите язык разговорника и аудио-урок:",
+        "en": "Choose phrasebook language and audio lesson:",
+        "uz": "So'zlashgich tilini va audio darsni tanlang:"
+    }
+    text = text_map.get(interface_lang, text_map["ru"])
+    
+    # Если это callback_query (пагинация), редактируем существующее сообщение
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()  # Убираем индикатор загрузки
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+        except Exception as e:
+            logger.error(f"Ошибка редактирования сообщения: {e}")
+            # Если не удалось отредактировать (например, сообщение не изменилось), отправляем новое
+            await query.message.reply_text(text, reply_markup=reply_markup)
+    else:
+        # Первый вызов - отправляем новое сообщение
+        await update.effective_message.reply_text(text, reply_markup=reply_markup)
+
+async def play_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE, language: str, category: str, order: int):
+    """Отправить аудио-урок пользователю."""
+    query = update.callback_query
+    if query:
+        await query.answer()  # Убираем индикатор загрузки
+    
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    
+    # Удаляем сообщение "Регистрация завершена", если это первое прослушивание
+    registration_complete_msg_id = context.user_data.get('registration_complete_message_id')
+    if registration_complete_msg_id and chat_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=registration_complete_msg_id)
+            logger.debug(f"Удалено сообщение о завершении регистрации {registration_complete_msg_id} для пользователя {user_id}")
+            # Очищаем сохраненный ID
+            context.user_data.pop('registration_complete_message_id', None)
+        except Exception as e:
+            logger.debug(f"Не удалось удалить сообщение о завершении регистрации {registration_complete_msg_id}: {e}")
+            # Очищаем ID даже если не удалось удалить (сообщение могло быть уже удалено)
+            context.user_data.pop('registration_complete_message_id', None)
+    
+    # Удаляем предыдущее аудио, если оно есть
+    if user_id in user_last_audio_id and chat_id:
+        previous_audio_id = user_last_audio_id[user_id]
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=previous_audio_id)
+            logger.debug(f"Удалено предыдущее аудио {previous_audio_id} для пользователя {user_id}")
+        except Exception as e:
+            logger.debug(f"Не удалось удалить предыдущее аудио {previous_audio_id}: {e}")
+    
+    # Определяем язык разговорника из context или автоматически
+    audio_lang = context.user_data.get('audio_lang')
+    if audio_lang is None:
+        # Если язык интерфейса английский, используем английский разговорник
+        # Иначе - русский
+        if language == 'en':
+            audio_lang = 'en'
+        else:
+            audio_lang = 'ru'
+    
+    lessons = AUDIO_INDEX.get(audio_lang, {}).get(category, [])
+    target = None
+    for it in lessons:
+        if it["order"] == order:
+            target = it
+            break
+    if not target:
+        msg_target = query.message if query else update.effective_message
+        await msg_target.reply_text("Урок не найден.")
+        return
+    path = target["path"]
+    title = target["title"]
+    # Добавляем номер урока в формате, как в списке (например, "01. Text")
+    order = target["order"]
+    formatted_title = f"{order:02d}. {title}"
+    
+    try:
+        msg_target = query.message if query else update.effective_message
+        with open(path, "rb") as f:
+            audio_msg = await msg_target.reply_audio(audio=f, title=formatted_title, caption=formatted_title)
+            # Сохраняем ID нового аудио-сообщения
+            if audio_msg:
+                user_last_audio_id[user_id] = audio_msg.message_id
+    except FileNotFoundError:
+        msg_target = query.message if query else update.effective_message
+        await msg_target.reply_text("Файл урока не найден на сервере.")
+    except Exception as e:
+        logger.error(f"Ошибка отправки аудио: {e}")
+        msg_target = query.message if query else update.effective_message
+        await msg_target.reply_text("Не удалось отправить аудио.")
+
+# Названия категорий на разных языках
+CATEGORY_NAMES = {
+    'ru': {
+        'lessons': 'Уроки',
+        'dialogs': 'Диалоги',
+        'mini_dialogs': 'Мини-диалоги'
+    },
+    'en': {
+        'lessons': 'Lessons',
+        'dialogs': 'Dialogs',
+        'mini_dialogs': 'Mini Dialogs'
+    },
+    'uz': {
+        'lessons': 'Darslar',
+        'dialogs': 'Dialoglar',
+        'mini_dialogs': 'Mini dialoglar'
+    }
+}
 
 # Тексты сообщений (можно расширить для мультиязычности)
 TEXTS = {
@@ -151,13 +477,19 @@ def format_phone_number(phone: str) -> str:
     return phone
 
 
-async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT_TYPE, delete_current: bool = False):
-    """Удалить предыдущие сообщения бота из чата (асинхронно в фоне)
+# Хранилище ID сообщений для удаления (только для регистрации)
+# Структура: {user_id: [message_ids]}
+user_registration_message_ids: Dict[int, List[int]] = {}
+
+
+async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT_TYPE, delete_current: bool = False, exclude_message_id: int = None):
+    """Удалить предыдущие сообщения регистрации (вопрос бота и ответ пользователя)
     
     Args:
-        update: Update объект
-        context: Context объект
-        delete_current: Если True, удаляет также последнее сообщение бота
+        update: Обновление от Telegram
+        context: Контекст бота
+        delete_current: Удалить ли текущее сообщение
+        exclude_message_id: ID сообщения, которое НЕ нужно удалять (например, только что отправленное)
     """
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id if update.effective_chat else None
@@ -165,141 +497,87 @@ async def delete_previous_messages(update: Update, context: ContextTypes.DEFAULT
     if not chat_id:
         return
     
-    # Получаем список ID сообщений бота для удаления
-    message_ids_to_delete = user_last_message_ids.get(user_id, [])
+    # Получаем список сообщений для удаления
+    message_ids_to_delete = user_registration_message_ids.get(user_id, []).copy()
     
-    # Получаем список ID команд пользователя для удаления (кроме последней)
-    command_ids_to_delete = user_last_command_ids.get(user_id, [])
+    # Если нужно удалить текущее сообщение, добавляем его
+    if delete_current:
+        if update.message:
+            current_id = update.message.message_id
+            if current_id not in message_ids_to_delete:
+                message_ids_to_delete.append(current_id)
+        elif update.callback_query and update.callback_query.message:
+            current_id = update.callback_query.message.message_id
+            if current_id not in message_ids_to_delete:
+                message_ids_to_delete.append(current_id)
     
-    # Удаляем сообщения бота в фоне (не блокируя основной поток)
-    if message_ids_to_delete:
-        if delete_current:
-            # Удаляем все сообщения, включая последнее
-            messages_to_delete = message_ids_to_delete.copy()
-            # Очищаем список
-            if user_id in user_last_message_ids:
-                user_last_message_ids[user_id] = []
-            
-            # Также удаляем последнюю команду пользователя (если есть)
-            command_to_delete = None
-            if command_ids_to_delete:
-                command_to_delete = command_ids_to_delete[-1]
-                # Оставляем только последнюю команду в списке (она будет удалена)
-                if user_id in user_last_command_ids:
-                    user_last_command_ids[user_id] = command_ids_to_delete[:-1] if len(command_ids_to_delete) > 1 else []
-        else:
-            # Удаляем все, кроме последнего сообщения (оставляем текущее)
-            if len(message_ids_to_delete) > 1:
-                messages_to_delete = message_ids_to_delete[:-1]  # Все кроме последнего
-                # Оставляем только последнее сообщение в списке
-                if user_id in user_last_message_ids:
-                    user_last_message_ids[user_id] = [message_ids_to_delete[-1]]
-            else:
-                # Если только одно сообщение и не нужно удалять текущее, не удаляем ничего
-                messages_to_delete = []
-            command_to_delete = None
-        
-        if messages_to_delete or command_to_delete:
-            async def delete_messages_and_command():
-                # Удаляем сообщения бота
-                for message_id in messages_to_delete:
-                    try:
-                        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-                    except Exception as e:
-                        logger.debug(f"Не удалось удалить сообщение бота {message_id}: {e}")
-                
-                # Удаляем последнюю команду пользователя (если нужно)
-                if command_to_delete:
-                    try:
-                        await context.bot.delete_message(chat_id=chat_id, message_id=command_to_delete)
-                    except Exception as e:
-                        logger.debug(f"Не удалось удалить команду пользователя {command_to_delete}: {e}")
-            
-            # Запускаем удаление в фоне
-            import asyncio
-            asyncio.create_task(delete_messages_and_command())
+    # Исключаем сообщение, которое не нужно удалять
+    if exclude_message_id:
+        message_ids_to_delete = [msg_id for msg_id in message_ids_to_delete if msg_id != exclude_message_id]
     
-    # Удаляем предыдущие команды пользователя (кроме последней) в фоне
-    # Это делается только если delete_current=False
-    if not delete_current and len(command_ids_to_delete) > 1:
-        commands_to_delete = command_ids_to_delete[:-1]
+    if not message_ids_to_delete:
+        return
+    
+    # Удаляем сообщения асинхронно, чтобы не блокировать интерфейс
+    async def delete_messages():
+        for msg_id in message_ids_to_delete:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=msg_id)
+            except Exception as e:
+                logger.debug(f"Не удалось удалить сообщение {msg_id}: {e}")
         
-        async def delete_commands():
-            for command_id in commands_to_delete:
-                try:
-                    await context.bot.delete_message(chat_id=chat_id, message_id=command_id)
-                except Exception as e:
-                    logger.debug(f"Не удалось удалить команду пользователя {command_id}: {e}")
-            # Оставляем только последнюю команду в списке
-            if user_id in user_last_command_ids:
-                user_last_command_ids[user_id] = [command_ids_to_delete[-1]]
-        
-        # Запускаем удаление в фоне
-        import asyncio
-        asyncio.create_task(delete_commands())
+        # Очищаем список после удаления (только те, которые были удалены)
+        if user_id in user_registration_message_ids:
+            # Удаляем только те ID, которые были успешно удалены
+            remaining = [msg_id for msg_id in user_registration_message_ids[user_id] if msg_id not in message_ids_to_delete]
+            user_registration_message_ids[user_id] = remaining
+    
+    # Запускаем удаление в фоне
+    asyncio.create_task(delete_messages())
 
 
 def save_message_id(message, user_id: int):
-    """Сохранить ID сообщения бота для последующего удаления"""
-    if not user_id:
+    """Сохранить ID сообщения бота для последующего удаления (только для регистрации)"""
+    if not message:
         return
     
-    if user_id not in user_last_message_ids:
-        user_last_message_ids[user_id] = []
+    if user_id not in user_registration_message_ids:
+        user_registration_message_ids[user_id] = []
     
-    # Ограничиваем количество сохраняемых сообщений (последние 10)
-    if len(user_last_message_ids[user_id]) >= 10:
-        user_last_message_ids[user_id] = user_last_message_ids[user_id][-9:]
-    
-    user_last_message_ids[user_id].append(message.message_id)
+    user_registration_message_ids[user_id].append(message.message_id)
 
 
 def save_command_id(update: Update, message_id: int):
-    """Сохранить ID команды пользователя для последующего удаления"""
+    """Сохранить ID сообщения пользователя для последующего удаления (только для регистрации)"""
     user_id = update.effective_user.id
     
-    if user_id not in user_last_command_ids:
-        user_last_command_ids[user_id] = []
+    if user_id not in user_registration_message_ids:
+        user_registration_message_ids[user_id] = []
     
-    # Ограничиваем количество сохраняемых команд (последние 10)
-    if len(user_last_command_ids[user_id]) >= 10:
-        user_last_command_ids[user_id] = user_last_command_ids[user_id][-9:]
-    
-    user_last_command_ids[user_id].append(message_id)
+    user_registration_message_ids[user_id].append(message_id)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /start"""
     user_id = update.effective_user.id
     
-    # Сохраняем ID команды пользователя
-    save_command_id(update, update.message.message_id)
-    
     # Проверяем, зарегистрирован ли пользователь
     user = await db.get_user(user_id)
     
     if user:
-        # Пользователь уже зарегистрирован - перенаправляем на сайт
-        # Удаляем предыдущие сообщения (асинхронно в фоне)
-        await delete_previous_messages(update, context)
-        
-        language = user.get('language', 'ru')
-        text = get_text(language, 'welcome_back')
-        
-        keyboard = [
-            [InlineKeyboardButton(
-                get_text(language, 'go_to_website'),
-                url=BOOK_WEBSITE_URL
-            )]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        msg = await update.message.reply_text(text, reply_markup=reply_markup)
-        save_message_id(msg, user_id)
+        # Пользователь уже зарегистрирован - показываем список уроков
+        language = user.get('language', 'ru') or 'ru'
+        await show_lessons_menu(update, context, language=language, category="lessons", page=1)
         return ConversationHandler.END
     
     # Новый пользователь - начинаем регистрацию
-    # НЕ удаляем сообщения до получения контакта
+    # Очищаем предыдущие сообщения регистрации, если они есть
+    if user_id in user_registration_message_ids:
+        user_registration_message_ids[user_id] = []
+    
+    # Сохраняем ID команды пользователя
+    save_command_id(update, update.message.message_id)
+    
     keyboard = [
         [
             InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
@@ -333,10 +611,6 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     user_id = update.effective_user.id
     
-    # Сообщение с выбором языка уже было сохранено в start()
-    # Удаляем предыдущие сообщения + текущее сообщение с выбором языка + команду /start
-    await delete_previous_messages(update, context, delete_current=True)
-    
     language = query.data.split('_')[1]  # lang_ru -> ru
     
     # Сохраняем выбранный язык
@@ -364,6 +638,11 @@ async def language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     save_message_id(msg, user_id)
     
+    # Удаляем предыдущие сообщения (вопрос бота о выборе языка и команду /start)
+    # Также удаляем текущее сообщение с выбором языка (callback_query)
+    # Исключаем только что отправленное сообщение с запросом контакта
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+    
     return WAITING_CONTACT
 
 
@@ -372,12 +651,10 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     contact = update.message.contact
     language = context.user_data['registration'].get('language', 'ru')
     
-    # Сохраняем ID сообщения пользователя с контактом
     user_id = update.effective_user.id
-    save_command_id(update, update.message.message_id)
     
-    # Удаляем предыдущие сообщения + последнее сообщение бота с запросом контакта
-    await delete_previous_messages(update, context, delete_current=True)
+    # Сохраняем ID сообщения пользователя с контактом
+    save_command_id(update, update.message.message_id)
     
     # Сохраняем номер телефона с форматированием (всегда со знаком '+')
     phone_number = format_phone_number(contact.phone_number)
@@ -393,6 +670,10 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
     save_message_id(msg, user_id)
     
+    # Удаляем предыдущие сообщения (вопрос бота о контакте и ответ пользователя)
+    # Исключаем только что отправленное сообщение с запросом имени
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+    
     return WAITING_FIRST_NAME
 
 
@@ -401,12 +682,10 @@ async def receive_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     first_name = update.message.text.strip()
     language = context.user_data['registration'].get('language', 'ru')
     
-    # Сохраняем ID сообщения пользователя с именем
     user_id = update.effective_user.id
-    save_command_id(update, update.message.message_id)
     
-    # Удаляем предыдущие сообщения + последнее сообщение бота
-    await delete_previous_messages(update, context, delete_current=True)
+    # Сохраняем ID сообщения пользователя с именем
+    save_command_id(update, update.message.message_id)
     
     # Сохраняем имя
     context.user_data['registration']['first_name'] = first_name
@@ -418,6 +697,10 @@ async def receive_first_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     msg = await update.message.reply_text(text)
     save_message_id(msg, user_id)
     
+    # Удаляем предыдущие сообщения (вопрос бота об имени и ответ пользователя)
+    # Исключаем только что отправленное сообщение с запросом фамилии
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+    
     return WAITING_LAST_NAME
 
 
@@ -426,12 +709,10 @@ async def receive_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     last_name = update.message.text.strip()
     language = context.user_data['registration'].get('language', 'ru')
     
-    # Сохраняем ID сообщения пользователя с фамилией
     user_id = update.effective_user.id
-    save_command_id(update, update.message.message_id)
     
-    # Удаляем предыдущие сообщения + последнее сообщение бота
-    await delete_previous_messages(update, context, delete_current=True)
+    # Сохраняем ID сообщения пользователя с фамилией
+    save_command_id(update, update.message.message_id)
     
     # Сохраняем фамилию
     context.user_data['registration']['last_name'] = last_name
@@ -457,6 +738,10 @@ async def receive_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     msg = await update.message.reply_text(text, reply_markup=reply_markup)
     save_message_id(msg, user_id)
     
+    # Удаляем предыдущие сообщения (вопрос бота о фамилии и ответ пользователя)
+    # Исключаем только что отправленное сообщение с выбором области
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+    
     return WAITING_REGION
 
 
@@ -466,12 +751,6 @@ async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await query.answer()
     
     user_id = update.effective_user.id
-    
-    # Сохраняем ID текущего сообщения с выбором области для удаления
-    save_message_id(query.message, user_id)
-    
-    # Удаляем предыдущие сообщения + текущее сообщение с выбором области
-    await delete_previous_messages(update, context, delete_current=True)
     
     region_index = int(query.data.split('_')[1])
     language = context.user_data['registration'].get('language', 'ru')
@@ -490,6 +769,10 @@ async def region_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     msg = await query.message.reply_text(text)
     save_message_id(msg, user_id)
     
+    # Удаляем предыдущие сообщения (вопрос бота о выборе области и выбор пользователя)
+    # Исключаем только что отправленное сообщение с запросом адреса
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+    
     return WAITING_ADDRESS
 
 
@@ -499,16 +782,17 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     language = context.user_data['registration'].get('language', 'ru')
     region = context.user_data['registration'].get('region', '')
     
-    # Сохраняем ID сообщения пользователя с адресом
     user_id = update.effective_user.id
-    save_command_id(update, update.message.message_id)
     
-    # Удаляем предыдущие сообщения + последнее сообщение бота
-    await delete_previous_messages(update, context, delete_current=True)
+    # Сохраняем ID сообщения пользователя с адресом
+    save_command_id(update, update.message.message_id)
     
     # Сохраняем адрес (включая область)
     full_address = f"{region}, {address}" if region else address
     context.user_data['registration']['address'] = full_address
+    
+    # Удаляем предыдущие сообщения (вопрос бота об адресе и ответ пользователя)
+    await delete_previous_messages(update, context, delete_current=True)
     
     # Сохраняем пользователя в базу данных
     user_data = context.user_data['registration']
@@ -522,20 +806,20 @@ async def receive_address(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         save_message_id(msg, user_id)
         return ConversationHandler.END
     
-    # Уведомляем о завершении регистрации
-    complete_text = get_text(language, 'registration_complete')
-    website_text = get_text(language, 'go_to_website')
-    
-    keyboard = [
-        [InlineKeyboardButton(website_text, url=BOOK_WEBSITE_URL)]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    msg = await update.message.reply_text(complete_text, reply_markup=reply_markup)
-    save_message_id(msg, user_id)
-    
-    # Очищаем данные регистрации
+    # Очищаем данные регистрации и сообщения
     context.user_data.pop('registration', None)
+    if user_id in user_registration_message_ids:
+        user_registration_message_ids.pop(user_id)
+    
+    # Завершение регистрации и показ уроков
+    complete_text = get_text(language, 'registration_complete')
+    complete_msg = await update.message.reply_text(complete_text)
+    
+    # Сохраняем ID сообщения о завершении регистрации для последующего удаления
+    # при первом прослушивании аудио
+    context.user_data['registration_complete_message_id'] = complete_msg.message_id
+    
+    await show_lessons_menu(update, context, language=language, category="lessons", page=1)
     
     return ConversationHandler.END
 
@@ -556,19 +840,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = await db.get_user(user_id)
     
     if user:
-        # Пользователь зарегистрирован - перенаправляем на сайт
-        language = user.get('language', 'ru')
-        text = get_text(language, 'welcome_back')
-        
-        keyboard = [
-            [InlineKeyboardButton(
-                get_text(language, 'go_to_website'),
-                url=BOOK_WEBSITE_URL
-            )]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        await update.message.reply_text(text, reply_markup=reply_markup)
+        # Пользователь зарегистрирован - показать меню уроков
+        language = user.get('language', 'ru') or 'ru'
+        # Очищаем сохраненный язык разговорника при новом входе
+        context.user_data.pop('audio_lang', None)
+        await show_lessons_menu(update, context, language=language, category="lessons", page=1)
     else:
         # Не зарегистрирован - предлагаем начать
         await update.message.reply_text(get_text('ru', 'start_again'))
@@ -580,6 +856,8 @@ async def post_init(application: Application) -> None:
     db = Database(DATABASE_PATH)
     await db.init_db()
     logger.info("База данных инициализирована")
+    # Строим индекс аудио
+    build_audio_index()
 
 
 def get_bot_application():
@@ -607,6 +885,97 @@ def get_bot_application():
     # Добавление обработчиков
     application.add_handler(conv_handler)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Хендлеры списков и проигрывания
+    async def handle_noop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик для кнопки без действия (номер страницы)"""
+        query = update.callback_query
+        if query:
+            await query.answer()
+    
+    async def handle_list_page(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик пагинации списка уроков"""
+        query = update.callback_query
+        if not query:
+            return
+        parts = query.data.split('_')
+        if len(parts) < 3:
+            await query.answer("Ошибка")
+            return
+        # Формат: list_{category}_{page}
+        # Категория может содержать подчеркивания (например, mini_dialogs)
+        # Поэтому берем все части кроме первой (list) и последней (page)
+        category = '_'.join(parts[1:-1])  # Все части между 'list' и номером страницы
+        try:
+            page = int(parts[-1])  # Последняя часть - номер страницы
+        except ValueError:
+            await query.answer("Ошибка: неверный формат")
+            return
+        # Получаем язык интерфейса пользователя из базы данных
+        user_id = update.effective_user.id
+        user = await db.get_user(user_id)
+        interface_lang = user.get('language', 'ru') if user else 'ru'
+        # Получаем текущий язык разговорника из context (если был выбран ранее)
+        audio_lang = context.user_data.get('audio_lang')
+        await show_lessons_menu(update, context, language=interface_lang, category=category, page=page, audio_lang=audio_lang)
+    
+    async def handle_play_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик проигрывания урока"""
+        query = update.callback_query
+        if not query:
+            return
+        parts = query.data.split('_')
+        if len(parts) < 3:
+            await query.answer("Ошибка")
+            return
+        # Формат: play_{category}_{order}
+        # Категория может содержать подчеркивания (например, mini_dialogs)
+        # Поэтому берем все части кроме первой (play) и последней (order)
+        category = '_'.join(parts[1:-1])  # Все части между 'play' и номером урока
+        try:
+            order = int(parts[-1])  # Последняя часть - номер урока
+        except ValueError:
+            await query.answer("Ошибка: неверный формат")
+            return
+        # Получаем язык пользователя из базы данных
+        user_id = update.effective_user.id
+        user = await db.get_user(user_id)
+        language = user.get('language', 'ru') if user else 'ru'
+        await play_lesson(update, context, language=language, category=category, order=order)
+    
+    async def handle_switch_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик переключения языка разговорника"""
+        query = update.callback_query
+        if not query:
+            return
+        parts = query.data.split('_')
+        if len(parts) < 5:
+            await query.answer("Ошибка")
+            return
+        # Формат: switch_lang_{audio_lang}_{category}_{page}
+        audio_lang = parts[2]  # ru или en
+        category = '_'.join(parts[3:-1])  # Категория может содержать подчеркивания
+        try:
+            page = int(parts[-1])  # Последняя часть - номер страницы
+        except ValueError:
+            await query.answer("Ошибка: неверный формат")
+            return
+        
+        # Сохраняем выбранный язык разговорника в context
+        context.user_data['audio_lang'] = audio_lang
+        
+        # Получаем язык интерфейса пользователя из базы данных
+        user_id = update.effective_user.id
+        user = await db.get_user(user_id)
+        interface_lang = user.get('language', 'ru') if user else 'ru'
+        
+        # Показываем список уроков на выбранном языке разговорника
+        await show_lessons_menu(update, context, language=interface_lang, category=category, page=page, audio_lang=audio_lang)
+    
+    application.add_handler(CallbackQueryHandler(handle_noop, pattern="^noop$"))
+    application.add_handler(CallbackQueryHandler(handle_switch_lang, pattern=r"^switch_lang_"))
+    application.add_handler(CallbackQueryHandler(handle_list_page, pattern=r"^list_"))
+    application.add_handler(CallbackQueryHandler(handle_play_lesson, pattern=r"^play_"))
     
     return application
 
