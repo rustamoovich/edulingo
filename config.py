@@ -17,6 +17,9 @@ ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "admin123")
 SECRET_KEY = os.getenv("SECRET_KEY", "change_me_secret")
 
+# Настройки канала для обязательной подписки
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")  # Например: "@edulingo_channel" или "edulingo_channel"
+
 # Проверка обязательных переменных
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не установлен! Проверьте файл .env")

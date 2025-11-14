@@ -17,7 +17,7 @@ from telegram.ext import (
     ConversationHandler
 )
 from database import Database
-from config import BOT_TOKEN, BOOK_WEBSITE_URL, DATABASE_PATH
+from config import BOT_TOKEN, BOOK_WEBSITE_URL, DATABASE_PATH, CHANNEL_USERNAME
 
 # Состояния разговора
 CHOOSING_LANGUAGE, WAITING_CONTACT, WAITING_FIRST_NAME, WAITING_LAST_NAME, WAITING_REGION, WAITING_ADDRESS = range(6)
@@ -229,6 +229,10 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     # Сохраняем выбранный язык разговорника в context
     context.user_data['audio_lang'] = audio_lang
     
+    # Сохраняем текущую категорию и страницу
+    context.user_data['current_category'] = category
+    context.user_data['current_page'] = page
+    
     if not AUDIO_INDEX or not AUDIO_INDEX.get(audio_lang):
         build_audio_index()
     lessons_by_cat = AUDIO_INDEX.get(audio_lang, {})
@@ -425,7 +429,11 @@ TEXTS = {
         'registration_complete': 'Регистрация завершена. Спасибо!',
         'go_to_website': 'Открыть сайт книги',
         'welcome_back': 'Добро пожаловать обратно! Вы уже зарегистрированы.',
-        'start_again': 'Нажмите /start для начала регистрации.'
+        'start_again': 'Нажмите /start для начала регистрации.',
+        'subscribe_required': 'Для использования бота необходимо подписаться на наш канал:',
+        'subscribe_button': 'Подписаться на канал',
+        'check_subscription': 'Проверить подписку',
+        'not_subscribed': 'Вы еще не подписались на канал. Пожалуйста, подпишитесь и попробуйте снова.'
     },
     'en': {
         'choose_language': 'Choose interface language:',
@@ -438,7 +446,11 @@ TEXTS = {
         'registration_complete': 'Registration completed. Thank you!',
         'go_to_website': 'Go to book website',
         'welcome_back': 'Welcome back! You are already registered.',
-        'start_again': 'Press /start to begin registration.'
+        'start_again': 'Press /start to begin registration.',
+        'subscribe_required': 'To use the bot, you need to subscribe to our channel:',
+        'subscribe_button': 'Subscribe to channel',
+        'check_subscription': 'Check subscription',
+        'not_subscribed': 'You haven\'t subscribed to the channel yet. Please subscribe and try again.'
     },
     'uz': {
         'choose_language': 'Interfeys tilini tanlang:',
@@ -451,7 +463,11 @@ TEXTS = {
         'registration_complete': 'Ro\'yxatdan o\'tish yakunlandi. Rahmat!',
         'go_to_website': 'Kitob veb-saytiga o\'tish',
         'welcome_back': 'Xush kelibsiz! Siz allaqachon ro\'yxatdan o\'tgansiz.',
-        'start_again': 'Ro\'yxatdan o\'tishni boshlash uchun /start ni bosing.'
+        'start_again': 'Ro\'yxatdan o\'tishni boshlash uchun /start ni bosing.',
+        'subscribe_required': 'Botdan foydalanish uchun kanalga obuna bo\'ling:',
+        'subscribe_button': 'Kanalga obuna bo\'lish',
+        'check_subscription': 'Tekshirish',
+        'not_subscribed': 'Siz hali kanalga obuna bo\'lmadingiz. Iltimos, kanalga obuna bo\'ling va qayta urinib ko\'ring.'
     }
 }
 
@@ -460,6 +476,27 @@ def get_text(language: str, key: str) -> str:
     """Получить текст на выбранном языке"""
     lang = language if language in TEXTS else 'ru'
     return TEXTS[lang].get(key, TEXTS['ru'][key])
+
+
+async def check_channel_subscription(bot, user_id: int, channel_username: str) -> bool:
+    """Проверить, подписан ли пользователь на канал"""
+    if not channel_username:
+        # Если канал не указан, считаем что проверка не требуется
+        return True
+    
+    try:
+        # Убираем @ если есть
+        channel = channel_username.lstrip('@')
+        
+        # Получаем информацию о статусе пользователя в канале
+        chat_member = await bot.get_chat_member(chat_id=f"@{channel}", user_id=user_id)
+        
+        # Проверяем статус: если не "left", значит подписан
+        return chat_member.status != "left"
+    except Exception as e:
+        logger.error(f"Ошибка проверки подписки на канал {channel_username}: {e}")
+        # В случае ошибки разрешаем доступ (чтобы не блокировать пользователей)
+        return True
 
 
 def format_phone_number(phone: str) -> str:
@@ -560,6 +597,32 @@ def save_command_id(update: Update, message_id: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /start"""
     user_id = update.effective_user.id
+    
+    # Проверяем подписку на канал, если требуется
+    if CHANNEL_USERNAME:
+        is_subscribed = await check_channel_subscription(context.bot, user_id, CHANNEL_USERNAME)
+        if not is_subscribed:
+            # Пользователь не подписан - показываем сообщение с кнопкой подписки
+            # Определяем язык интерфейса (пробуем получить из базы, иначе русский)
+            user = await db.get_user(user_id)
+            language = user.get('language', 'ru') if user else 'ru'
+            
+            text = get_text(language, 'subscribe_required')
+            subscribe_text = get_text(language, 'subscribe_button')
+            check_text = get_text(language, 'check_subscription')
+            
+            # Создаем кнопки: ссылка на канал и проверка подписки
+            keyboard = [
+                [InlineKeyboardButton(subscribe_text, url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
+                [InlineKeyboardButton(check_text, callback_data="check_subscription")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"{text}\n@{CHANNEL_USERNAME.lstrip('@')}",
+                reply_markup=reply_markup
+            )
+            return ConversationHandler.END
     
     # Проверяем, зарегистрирован ли пользователь
     user = await db.get_user(user_id)
@@ -837,6 +900,31 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений для незарегистрированных пользователей"""
     user_id = update.effective_user.id
+    
+    # Проверяем подписку на канал, если требуется
+    if CHANNEL_USERNAME:
+        is_subscribed = await check_channel_subscription(update.get_bot(), user_id, CHANNEL_USERNAME)
+        if not is_subscribed:
+            # Пользователь не подписан - показываем сообщение с кнопкой подписки
+            user = await db.get_user(user_id)
+            language = user.get('language', 'ru') if user else 'ru'
+            
+            text = get_text(language, 'subscribe_required')
+            subscribe_text = get_text(language, 'subscribe_button')
+            check_text = get_text(language, 'check_subscription')
+            
+            keyboard = [
+                [InlineKeyboardButton(subscribe_text, url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
+                [InlineKeyboardButton(check_text, callback_data="check_subscription")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await update.message.reply_text(
+                f"{text}\n@{CHANNEL_USERNAME.lstrip('@')}",
+                reply_markup=reply_markup
+            )
+            return
+    
     user = await db.get_user(user_id)
     
     if user:
@@ -866,6 +954,57 @@ def get_bot_application():
     # Используем update_queue=None чтобы не создавать Updater
     application = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     
+    # Обработчик проверки подписки на канал
+    async def handle_check_subscription(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обработчик проверки подписки на канал"""
+        query = update.callback_query
+        if query:
+            await query.answer()
+        
+        user_id = update.effective_user.id
+        
+        if not CHANNEL_USERNAME:
+            await query.message.reply_text("Проверка подписки не требуется.")
+            return
+        
+        # Проверяем подписку
+        is_subscribed = await check_channel_subscription(context.bot, user_id, CHANNEL_USERNAME)
+        
+        if is_subscribed:
+            # Пользователь подписан - продолжаем работу
+            user = await db.get_user(user_id)
+            if user:
+                # Пользователь зарегистрирован - показываем список уроков
+                language = user.get('language', 'ru') or 'ru'
+                await query.message.delete()  # Удаляем сообщение с кнопкой подписки
+                await show_lessons_menu(update, context, language=language, category="lessons", page=1)
+            else:
+                # Пользователь не зарегистрирован - просим запустить регистрацию через /start
+                await query.message.delete()  # Удаляем сообщение с кнопкой подписки
+                # Определяем язык интерфейса (по умолчанию русский)
+                language = 'ru'
+                text = get_text(language, 'start_again')
+                await query.message.chat.send_message(text)
+        else:
+            # Пользователь не подписан
+            user = await db.get_user(user_id)
+            language = user.get('language', 'ru') if user else 'ru'
+            
+            not_subscribed_text = get_text(language, 'not_subscribed')
+            subscribe_text = get_text(language, 'subscribe_button')
+            check_text = get_text(language, 'check_subscription')
+            
+            keyboard = [
+                [InlineKeyboardButton(subscribe_text, url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}")],
+                [InlineKeyboardButton(check_text, callback_data="check_subscription")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.edit_text(
+                f"{not_subscribed_text}\n@{CHANNEL_USERNAME.lstrip('@')}",
+                reply_markup=reply_markup
+            )
+    
     # Создание ConversationHandler для регистрации
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
@@ -884,6 +1023,7 @@ def get_bot_application():
     
     # Добавление обработчиков
     application.add_handler(conv_handler)
+    application.add_handler(CallbackQueryHandler(handle_check_subscription, pattern="^check_subscription$"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Хендлеры списков и проигрывания
@@ -911,12 +1051,26 @@ def get_bot_application():
         except ValueError:
             await query.answer("Ошибка: неверный формат")
             return
+        
+        # Проверяем, не нажата ли уже выбранная категория на той же странице
+        current_category = context.user_data.get('current_category')
+        current_page = context.user_data.get('current_page')
+        if current_category == category and current_page == page:
+            # Категория уже выбрана на той же странице - просто убираем индикатор загрузки
+            await query.answer()
+            return
+        
         # Получаем язык интерфейса пользователя из базы данных
         user_id = update.effective_user.id
         user = await db.get_user(user_id)
         interface_lang = user.get('language', 'ru') if user else 'ru'
         # Получаем текущий язык разговорника из context (если был выбран ранее)
         audio_lang = context.user_data.get('audio_lang')
+        
+        # Сохраняем текущую категорию и страницу
+        context.user_data['current_category'] = category
+        context.user_data['current_page'] = page
+        
         await show_lessons_menu(update, context, language=interface_lang, category=category, page=page, audio_lang=audio_lang)
     
     async def handle_play_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -959,6 +1113,15 @@ def get_bot_application():
             page = int(parts[-1])  # Последняя часть - номер страницы
         except ValueError:
             await query.answer("Ошибка: неверный формат")
+            return
+        
+        # Проверяем, не выбран ли уже этот язык разговорника
+        current_audio_lang = context.user_data.get('audio_lang')
+        current_category = context.user_data.get('current_category')
+        current_page = context.user_data.get('current_page')
+        if current_audio_lang == audio_lang and current_category == category and current_page == page:
+            # Язык разговорника уже выбран на той же категории и странице - просто убираем индикатор загрузки
+            await query.answer()
             return
         
         # Сохраняем выбранный язык разговорника в context
