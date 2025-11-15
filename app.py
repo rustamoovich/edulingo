@@ -23,7 +23,7 @@ def init_database():
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     
-    # Создаем таблицу users если её нет
+    # Создаем таблицу users если её нет (для новой БД)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             telegram_id INTEGER PRIMARY KEY,
@@ -32,19 +32,34 @@ def init_database():
             first_name TEXT,
             last_name TEXT,
             phone TEXT,
+            class INTEGER,
+            school_number TEXT,
+            english_level TEXT,
+            russian_level TEXT,
             address TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
-    # Проверяем наличие колонки username, если нет - добавляем
+    # Проверяем наличие всех необходимых колонок для существующей БД
     cursor.execute("PRAGMA table_info(users)")
     columns = [column[1] for column in cursor.fetchall()]
-    if 'username' not in columns:
-        try:
-            cursor.execute("ALTER TABLE users ADD COLUMN username TEXT")
-        except sqlite3.OperationalError:
-            pass  # Колонка уже существует
+    
+    columns_to_add = [
+        ('username', 'TEXT'),
+        ('class', 'INTEGER'),
+        ('school_number', 'TEXT'),
+        ('english_level', 'TEXT'),
+        ('russian_level', 'TEXT'),
+    ]
+    
+    for column_name, column_type in columns_to_add:
+        if column_name not in columns:
+            try:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {column_name} {column_type}")
+            except sqlite3.OperationalError:
+                # Колонка уже существует или не может быть добавлена
+                pass
     
     conn.commit()
     conn.close()
@@ -200,7 +215,11 @@ def users():
                 norm(r['phone']),
                 norm(r['address']),
                 norm(r['username']),
-                str(r['telegram_id'])
+                str(r['telegram_id']),
+                str(r['school_number'] or ''),
+                str(r['class'] or ''),
+                str(r['english_level'] or ''),
+                str(r['russian_level'] or '')
             ]
             if not any(cq in h for h in haystacks):
                 continue
@@ -233,7 +252,7 @@ def export_users():
 
     conn = get_db_connection()
     rows = conn.execute(
-        'SELECT telegram_id, username, language, first_name, last_name, phone, address, created_at FROM users ORDER BY datetime(created_at) DESC'
+        'SELECT telegram_id, username, language, first_name, last_name, phone, class, school_number, english_level, russian_level, address, created_at FROM users ORDER BY datetime(created_at) DESC'
     ).fetchall()
     conn.close()
 
@@ -257,7 +276,11 @@ def export_users():
                 norm(r['phone']),
                 norm(r['address']),
                 norm(r['username']),
-                str(r['telegram_id'])
+                str(r['telegram_id']),
+                str(r['school_number'] or ''),
+                str(r['class'] or ''),
+                str(r['english_level'] or ''),
+                str(r['russian_level'] or '')
             ]
             if not any(cq in h for h in haystacks):
                 continue
@@ -268,8 +291,8 @@ def export_users():
     ws = wb.active
     ws.title = "Пользователи"
     
-    # Заголовки на русском языке
-    headers = ['№', 'ID Telegram', 'Username', 'Язык', 'Имя', 'Фамилия', 'Телефон', 'Адрес', 'Дата регистрации']
+    # Заголовки на русском языке (без отдельного столбца ID Telegram)
+    headers = ['№', 'Имя пользователя', 'Язык', 'Имя', 'Фамилия', 'Телефон', 'Класс', 'Школа', 'Уровень англ.', 'Уровень рус.', 'Адрес', 'Дата регистрации']
     ws.append(headers)
     
     # Форматируем заголовки (жирный шрифт, выравнивание по центру, перенос текста)
@@ -282,48 +305,55 @@ def export_users():
     for idx, r in enumerate(filtered, start=1):
         # Форматируем телефон как текст для корректного отображения
         phone = r['phone'] or ''
+        school_number = r['school_number'] or ''
+        school_display = f"№ {school_number}" if school_number else ''
         
         ws.append([
             idx,  # Номер строки
-            r['telegram_id'],
             r['username'] or '',
             r['language'] or '',
             r['first_name'] or '',
             r['last_name'] or '',
             phone,  # openpyxl автоматически обрабатывает текст
+            r['class'] or '',
+            school_display,
+            r['english_level'] or '',
+            r['russian_level'] or '',
             r['address'] or '',
             r['created_at'] or ''
         ])
         
-        # Устанавливаем формат телефона как текст
+        # Устанавливаем формат телефона как текст (столбец 6)
         if phone:
-            phone_cell = ws.cell(row=idx + 1, column=7)
+            phone_cell = ws.cell(row=idx + 1, column=6)
             phone_cell.number_format = '@'  # Текстовый формат
         
         # Выравнивание: все вертикально по центру
-        # Горизонтально по центру все, кроме столбцов 5, 6 и 8 (имя, фамилия и адрес)
+        # Горизонтально по центру все, кроме столбцов 4, 5 и 11 (имя, фамилия и адрес)
         wrap_alignment_left = Alignment(horizontal='left', vertical='center', wrap_text=True)
         wrap_alignment_center = Alignment(horizontal='center', vertical='center', wrap_text=True)
         
-        for col_num in range(1, 10):  # Все столбцы от 1 до 9
+        for col_num in range(1, 13):  # Все столбцы от 1 до 12
             cell = ws.cell(row=idx + 1, column=col_num)
-            if col_num == 5 or col_num == 6 or col_num == 8:  # Столбцы Имя, Фамилия и Адрес - по левому краю
+            if col_num == 4 or col_num == 5 or col_num == 11:  # Столбцы Имя, Фамилия и Адрес - по левому краю
                 cell.alignment = wrap_alignment_left
             else:  # Остальные столбцы - по центру
                 cell.alignment = wrap_alignment_center
     
     # Устанавливаем ширину столбцов
-    # Столбец 1 (№) - 7, столбец 4 (Язык) - 7, столбец 8 (Адрес) - 30, остальные - 20
     column_widths = {
         1: 7,   # №
-        2: 20,  # ID Telegram
-        3: 20,  # Username
-        4: 7,   # Язык
-        5: 20,  # Имя
-        6: 20,  # Фамилия
-        7: 20,  # Телефон
-        8: 30,  # Адрес
-        9: 20   # Дата регистрации
+        2: 20,  # Username
+        3: 7,   # Язык
+        4: 20,  # Имя
+        5: 20,  # Фамилия
+        6: 20,  # Телефон
+        7: 10,  # Класс
+        8: 15,  # Школа
+        9: 12,  # Уровень англ.
+        10: 12, # Уровень рус.
+        11: 30, # Адрес
+        12: 20  # Дата регистрации
     }
     
     for col_num, width in column_widths.items():
@@ -427,6 +457,58 @@ def webhook_status():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
+@app.route('/setup-webhook')
+def setup_webhook():
+    """Установка webhook для ahost (вызывается вручную после деплоя)"""
+    try:
+        bot_app = get_bot()
+        
+        # Получаем URL из переменной окружения или из запроса
+        webhook_url = os.environ.get('WEBHOOK_URL')
+        if not webhook_url:
+            # Пытаемся определить из запроса
+            webhook_url = request.url_root.rstrip('/')
+        
+        if webhook_url:
+            webhook_full_url = f"{webhook_url}/webhook" if not webhook_url.endswith('/webhook') else webhook_url
+            
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            try:
+                if loop.is_closed():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                
+                loop.run_until_complete(bot_app.bot.set_webhook(url=webhook_full_url))
+                logging.info(f"Webhook установлен: {webhook_full_url}")
+                return jsonify({
+                    'status': 'success',
+                    'message': f'Webhook установлен: {webhook_full_url}',
+                    'webhook_url': webhook_full_url
+                })
+            except Exception as e:
+                logging.error(f"Ошибка установки webhook: {e}", exc_info=True)
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Ошибка установки webhook: {str(e)}'
+                }), 500
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': 'WEBHOOK_URL не указан. Укажите переменную окружения WEBHOOK_URL или используйте параметр ?url=...'
+            }), 400
+    except Exception as e:
+        logging.error(f"Ошибка в setup_webhook: {e}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+
 @app.route('/')
 def index():
     """Главная страница - редирект на админ-панель"""
@@ -441,6 +523,9 @@ def not_found(e):
         return jsonify({'error': 'Not found', 'path': request.path}), 404
     return redirect(url_for('users'))
 
+
+# Для Passenger (ahost) требуется переменная application
+application = app
 
 if __name__ == '__main__':
     import os

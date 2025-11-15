@@ -20,7 +20,7 @@ from database import Database
 from config import BOT_TOKEN, BOOK_WEBSITE_URL, DATABASE_PATH, CHANNEL_USERNAME
 
 # Состояния разговора
-CHOOSING_LANGUAGE, WAITING_CONTACT, WAITING_FIRST_NAME, WAITING_LAST_NAME, WAITING_REGION, WAITING_ADDRESS = range(6)
+CHOOSING_LANGUAGE, WAITING_CONTACT, WAITING_FIRST_NAME, WAITING_LAST_NAME, WAITING_CLASS, WAITING_SCHOOL, WAITING_ENGLISH_LEVEL, WAITING_RUSSIAN_LEVEL, WAITING_REGION, WAITING_ADDRESS = range(10)
 
 # Настройки уроков
 PAGE_SIZE = 12
@@ -192,8 +192,10 @@ def build_audio_index(audios_root: str = "audios") -> None:
                     "title": title,
                     "path": full_path.replace("\\", "/"),
                 })
-            # Сортировка по order, затем по имени
+            # Сортировка по order, затем по имени и назначение стабильных ID внутри категории
             AUDIO_INDEX[lang][cat].sort(key=lambda x: (x["order"], x["title"]))
+            for idx, item in enumerate(AUDIO_INDEX[lang][cat]):
+                item["id"] = idx
 
 def paginate(items: List[Dict], page: int, page_size: int = PAGE_SIZE) -> Tuple[List[Dict], int, int]:
     total = len(items)
@@ -253,7 +255,10 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     rows = []
     for it in page_items:
         label = f"{it['order']:02d}. {it['title']}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"play_{category}_{it['order']}")])
+        # Используем стабильный ID внутри категории, а не номер урока,
+        # чтобы избежать коллизий при одинаковых order (например, Text и Dialog)
+        audio_id = it.get("id")
+        rows.append([InlineKeyboardButton(label, callback_data=f"play_{category}_{audio_id}")])
     # Пагинация
     nav = []
     if cur_page > 1:
@@ -290,7 +295,7 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             if lang_option == 'ru':
                 label = "🇷🇺 Русский разговорник"
             elif lang_option == 'en':
-                label = "🇺🇸 English phrasebook"
+                label = "🇬🇧 English phrasebook"
             else:
                 label = lang_option
             
@@ -325,8 +330,12 @@ async def show_lessons_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         # Первый вызов - отправляем новое сообщение
         await update.effective_message.reply_text(text, reply_markup=reply_markup)
 
-async def play_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE, language: str, category: str, order: int):
-    """Отправить аудио-урок пользователю."""
+async def play_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE, language: str, category: str, audio_id: int):
+    """Отправить аудио-урок пользователю.
+    
+    audio_id — это индекс в списке категории (стабильный ID внутри категории),
+    а не номер урока в названии файла.
+    """
     query = update.callback_query
     if query:
         await query.answer()  # Убираем индикатор загрузки
@@ -367,20 +376,17 @@ async def play_lesson(update: Update, context: ContextTypes.DEFAULT_TYPE, langua
             audio_lang = 'ru'
     
     lessons = AUDIO_INDEX.get(audio_lang, {}).get(category, [])
-    target = None
-    for it in lessons:
-        if it["order"] == order:
-            target = it
-            break
-    if not target:
+    # Проверяем диапазон ID
+    if audio_id is None or audio_id < 0 or audio_id >= len(lessons):
         msg_target = query.message if query else update.effective_message
         await msg_target.reply_text("Урок не найден.")
         return
+    target = lessons[audio_id]
     path = target["path"]
     title = target["title"]
     # Добавляем номер урока в формате, как в списке (например, "01. Text")
-    order = target["order"]
-    formatted_title = f"{order:02d}. {title}"
+    order_num = target["order"]
+    formatted_title = f"{order_num:02d}. {title}"
     
     try:
         msg_target = query.message if query else update.effective_message
@@ -424,6 +430,10 @@ TEXTS = {
         'share_contact': 'Поделиться контактом',
         'enter_first_name': 'Введите ваше имя:',
         'enter_last_name': 'Введите вашу фамилию:',
+        'choose_class': 'Выберите ваш класс:',
+        'enter_school_number': 'Введите номер вашей школы:',
+        'choose_english_level': 'Выберите ваш уровень английского:',
+        'choose_russian_level': 'Выберите ваш уровень русского языка:',
         'choose_region': 'Выберите область/регион Узбекистана:',
         'enter_address': 'Введите адрес проживания:',
         'registration_complete': 'Регистрация завершена. Спасибо!',
@@ -441,6 +451,10 @@ TEXTS = {
         'share_contact': 'Share contact',
         'enter_first_name': 'Enter your first name:',
         'enter_last_name': 'Enter your last name:',
+        'choose_class': 'Choose your school grade:',
+        'enter_school_number': 'Enter your school number:',
+        'choose_english_level': 'Choose your English level:',
+        'choose_russian_level': 'Choose your Russian level:',
         'choose_region': 'Choose region of Uzbekistan:',
         'enter_address': 'Enter your address:',
         'registration_complete': 'Registration completed. Thank you!',
@@ -458,6 +472,10 @@ TEXTS = {
         'share_contact': 'Kontaktni ulashish',
         'enter_first_name': 'Ismingizni kiriting:',
         'enter_last_name': 'Familiyangizni kiriting:',
+        'choose_class': 'Sinfingizni tanlang:',
+        'enter_school_number': 'Maktab raqamingizni kiriting:',
+        'choose_english_level': 'Ingliz tili darajangizni tanlang:',
+        'choose_russian_level': 'Rus tili darajangizni tanlang:',
         'choose_region': 'O\'zbekiston viloyatini tanlang:',
         'enter_address': 'Yashash manzilingizni kiriting:',
         'registration_complete': 'Ro\'yxatdan o\'tish yakunlandi. Rahmat!',
@@ -644,7 +662,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     keyboard = [
         [
             InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru"),
-            InlineKeyboardButton("🇺🇸 English", callback_data="lang_en")
+            InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
         ],
         [InlineKeyboardButton("🇺🇿 Oʻzbekcha", callback_data="lang_uz")]
     ]
@@ -779,15 +797,211 @@ async def receive_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     # Сохраняем фамилию
     context.user_data['registration']['last_name'] = last_name
+    context.user_data['registration']['step'] = 'waiting_class'
+    
+    # Запрашиваем класс (1–11) с помощью инлайн-кнопок
+    text = get_text(language, 'choose_class')
+    
+    # Формируем инлайн-кнопки классов с подписями
+    rows = []
+    for i in range(1, 12):
+        if language == 'ru':
+            label = f"{i} класс"
+        elif language == 'en':
+            label = f"Grade {i}"
+        else:  # 'uz' и остальные
+            label = f"{i}-sinf"
+        button = InlineKeyboardButton(label, callback_data=f"class_{i}")
+        # По 3 кнопки в строке
+        if not rows or len(rows[-1]) >= 3:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+    reply_markup = InlineKeyboardMarkup(rows)
+    
+    msg = await update.message.reply_text(text, reply_markup=reply_markup)
+    save_message_id(msg, user_id)
+    
+    # Удаляем предыдущие сообщения (вопрос бота о фамилии и ответ пользователя)
+    # Исключаем только что отправленное сообщение с выбором класса
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+    
+    return WAITING_CLASS
+
+
+async def receive_school(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик получения номера школы"""
+    school_number = (update.message.text or "").strip()
+    language = context.user_data['registration'].get('language', 'ru')
+    user_id = update.effective_user.id
+
+    # Сохраняем ID сообщения пользователя
+    save_command_id(update, update.message.message_id)
+
+    # Сохраняем номер школы (как текст)
+    context.user_data['registration']['school_number'] = school_number
+    context.user_data['registration']['step'] = 'waiting_english_level'
+
+    # Спрашиваем уровень английского (инлайн-кнопки)
+    text = get_text(language, 'choose_english_level')
+
+    rows = []
+    level_codes = ["A0", "A1", "A2", "B1"]
+    for code in level_codes:
+        # Уровни английского всегда отображаем по-английски (с флагом)
+        if code == "A0":
+            label = "🇬🇧 A0 — Beginner"
+        elif code == "A1":
+            label = "🇬🇧 A1 — Elementary"
+        elif code == "A2":
+            label = "🇬🇧 A2 — Pre-Intermediate"
+        else:
+            label = "🇬🇧 B1 — Intermediate"
+
+        button = InlineKeyboardButton(label, callback_data=f"level_en_{code}")
+        # По 2 кнопки в строке
+        if not rows or len(rows[-1]) >= 2:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+
+    reply_markup = InlineKeyboardMarkup(rows)
+
+    msg = await update.message.reply_text(text, reply_markup=reply_markup)
+    save_message_id(msg, user_id)
+
+    # Удаляем предыдущие сообщения (вопрос о школе и ответ пользователя),
+    # исключая только что отправленное сообщение с выбором уровня
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+
+    return WAITING_ENGLISH_LEVEL
+
+
+async def class_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик выбора класса (inline-кнопки)"""
+    query = update.callback_query
+    await query.answer()
+
+    language = context.user_data['registration'].get('language', 'ru')
+    user_id = update.effective_user.id
+
+    # Извлекаем номер класса из callback_data, формата class_X
+    data = query.data
+    class_str = data.split('_')[1]
+
+    try:
+        class_value = int(class_str)
+    except ValueError:
+        # В случае некорректных данных просто запросим заново
+        text = get_text(language, 'choose_class')
+        msg = await query.message.reply_text(text)
+        save_message_id(msg, user_id)
+        return WAITING_CLASS
+
+    if not (1 <= class_value <= 11):
+        text = get_text(language, 'choose_class')
+        msg = await query.message.reply_text(text)
+        save_message_id(msg, user_id)
+        return WAITING_CLASS
+
+    # Сохраняем класс
+    context.user_data['registration']['class'] = class_value
+    context.user_data['registration']['step'] = 'waiting_school'
+
+    # Спрашиваем номер школы
+    text = get_text(language, 'enter_school_number')
+    msg = await query.message.reply_text(text)
+    save_message_id(msg, user_id)
+
+    # Удаляем сообщение с выбором класса
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+
+    return WAITING_SCHOOL
+
+
+async def english_level_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик выбора уровня английского (inline-кнопки)"""
+    query = update.callback_query
+    await query.answer()
+
+    language = context.user_data['registration'].get('language', 'ru')
+    user_id = update.effective_user.id
+
+    data = query.data  # level_en_A1, level_en_B1, ...
+    parts = data.split('_')
+    level_code = parts[-1].upper()
+    valid_levels = {"A0", "A1", "A2", "B1"}
+
+    if level_code not in valid_levels:
+        text = get_text(language, 'choose_english_level')
+        msg = await query.message.reply_text(text)
+        save_message_id(msg, user_id)
+        return WAITING_ENGLISH_LEVEL
+
+    # Сохраняем уровень английского
+    context.user_data['registration']['english_level'] = level_code
+    context.user_data['registration']['step'] = 'waiting_russian_level'
+
+    # Теперь спрашиваем уровень русского языка
+    text = get_text(language, 'choose_russian_level')
+
+    rows = []
+    level_codes = ["A0", "A1", "A2", "B1"]
+    for code in level_codes:
+        # Уровни русского всегда отображаем по-русски (с флагом)
+        if code == "A0":
+            label = "🇷🇺 A0 — Начальный"
+        elif code == "A1":
+            label = "🇷🇺 A1 — Элементарный"
+        elif code == "A2":
+            label = "🇷🇺 A2 — Ниже среднего"
+        else:
+            label = "🇷🇺 B1 — Средний"
+
+        button = InlineKeyboardButton(label, callback_data=f"level_ru_{code}")
+        if not rows or len(rows[-1]) >= 2:
+            rows.append([button])
+        else:
+            rows[-1].append(button)
+
+    reply_markup = InlineKeyboardMarkup(rows)
+
+    msg = await query.message.reply_text(text, reply_markup=reply_markup)
+    save_message_id(msg, user_id)
+
+    # Удаляем сообщение с выбором английского уровня
+    await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
+
+    return WAITING_RUSSIAN_LEVEL
+
+
+async def russian_level_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик выбора уровня русского (inline-кнопки)"""
+    query = update.callback_query
+    await query.answer()
+
+    language = context.user_data['registration'].get('language', 'ru')
+    user_id = update.effective_user.id
+
+    data = query.data  # level_ru_A1, level_ru_B1, ...
+    parts = data.split('_')
+    level_code = parts[-1].upper()
+    valid_levels = {"A0", "A1", "A2", "B1"}
+
+    if level_code not in valid_levels:
+        text = get_text(language, 'choose_russian_level')
+        msg = await query.message.reply_text(text)
+        save_message_id(msg, user_id)
+        return WAITING_RUSSIAN_LEVEL
+
+    # Сохраняем уровень русского
+    context.user_data['registration']['russian_level'] = level_code
     context.user_data['registration']['step'] = 'waiting_region'
-    
-    # Запрашиваем выбор области
+
+    # Далее — выбор области (как раньше)
     text = get_text(language, 'choose_region')
-    
-    # Получаем список областей на выбранном языке
+
     regions = UZBEKISTAN_REGIONS.get(language, UZBEKISTAN_REGIONS['ru'])
-    
-    # Создаем inline-клавиатуру с областями Узбекистана
     keyboard = []
     for i in range(0, len(regions), 2):
         row = []
@@ -795,16 +1009,15 @@ async def receive_last_name(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if i + 1 < len(regions):
             row.append(InlineKeyboardButton(regions[i + 1], callback_data=f"region_{i + 1}"))
         keyboard.append(row)
-    
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    msg = await update.message.reply_text(text, reply_markup=reply_markup)
+
+    msg = await query.message.reply_text(text, reply_markup=reply_markup)
     save_message_id(msg, user_id)
-    
-    # Удаляем предыдущие сообщения (вопрос бота о фамилии и ответ пользователя)
-    # Исключаем только что отправленное сообщение с выбором области
+
+    # Удаляем сообщение с выбором уровня русского
     await delete_previous_messages(update, context, delete_current=True, exclude_message_id=msg.message_id)
-    
+
     return WAITING_REGION
 
 
@@ -1013,6 +1226,10 @@ def get_bot_application():
             WAITING_CONTACT: [MessageHandler(filters.CONTACT, receive_contact)],
             WAITING_FIRST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_first_name)],
             WAITING_LAST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_last_name)],
+            WAITING_CLASS: [CallbackQueryHandler(class_callback, pattern="^class_")],
+            WAITING_SCHOOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_school)],
+            WAITING_ENGLISH_LEVEL: [CallbackQueryHandler(english_level_callback, pattern="^level_en_")],
+            WAITING_RUSSIAN_LEVEL: [CallbackQueryHandler(russian_level_callback, pattern="^level_ru_")],
             WAITING_REGION: [CallbackQueryHandler(region_callback, pattern="^region_")],
             WAITING_ADDRESS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_address)],
         },
@@ -1082,12 +1299,12 @@ def get_bot_application():
         if len(parts) < 3:
             await query.answer("Ошибка")
             return
-        # Формат: play_{category}_{order}
-        # Категория может содержать подчеркивания (например, mini_dialogs)
-        # Поэтому берем все части кроме первой (play) и последней (order)
-        category = '_'.join(parts[1:-1])  # Все части между 'play' и номером урока
+        # Формат: play_{category}_{audio_id}
+        # Категория может содержать подчеркивания (например, mini_dialogs),
+        # поэтому берем все части кроме первой (play) и последней (audio_id)
+        category = '_'.join(parts[1:-1])
         try:
-            order = int(parts[-1])  # Последняя часть - номер урока
+            audio_id = int(parts[-1])  # Последняя часть - ID аудио в категории
         except ValueError:
             await query.answer("Ошибка: неверный формат")
             return
@@ -1095,7 +1312,7 @@ def get_bot_application():
         user_id = update.effective_user.id
         user = await db.get_user(user_id)
         language = user.get('language', 'ru') if user else 'ru'
-        await play_lesson(update, context, language=language, category=category, order=order)
+        await play_lesson(update, context, language=language, category=category, audio_id=audio_id)
     
     async def handle_switch_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Обработчик переключения языка разговорника"""

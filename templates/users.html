@@ -45,6 +45,10 @@
             <th>Имя</th>
             <th>Фамилия</th>
             <th>Телефон</th>
+            <th>Класс</th>
+            <th>Школа</th>
+            <th class="text-center"><span class="fi fi-gb" title="Уровень английского"></span></th>
+            <th class="text-center"><span class="fi fi-ru" title="Уровень русского"></span></th>
             <th>Язык</th>
             <th>Адрес</th>
             <th>Дата</th>
@@ -67,6 +71,10 @@
             <td>{{ u['first_name'] or '—' }}</td>
             <td>{{ u['last_name'] or '—' }}</td>
             <td>{{ u['phone'] or '—' }}</td>
+            <td>{{ u['class'] or '—' }}</td>
+            <td>{{ ('№ ' ~ u['school_number']) if u['school_number'] else '—' }}</td>
+            <td>{{ u['english_level'] or '—' }}</td>
+            <td>{{ u['russian_level'] or '—' }}</td>
             <td>
               {% if u['language'] %}
               <span class="badge bg-secondary badge-lang">{{ u['language']|upper }}</span>
@@ -86,7 +94,7 @@
           </tr>
           {% else %}
           <tr>
-            <td colspan="8" class="text-center text-muted">Ничего не найдено</td>
+            <td colspan="12" class="text-center text-muted">Ничего не найдено</td>
           </tr>
           {% endfor %}
         </tbody>
